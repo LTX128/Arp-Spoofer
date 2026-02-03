@@ -102,7 +102,7 @@ INSTALLATION
 
 1) Clone repository
 -------------------
-git clone https://github.com/yourname/ARP-SPOOFER-LTX74.git
+git clone https://github.com/LTX128/Arp-Spoofer.git
 cd ARP-SPOOFER-LTX74
 
 2) Install dependencies
@@ -176,8 +176,6 @@ LIMITATIONS
 
 - HTTPS content cannot be decrypted
 - Some routers detect ARP spoofing
-- Requires admin/root privileges
-- Antivirus may flag compiled binaries
 
 ----------------------------------------------------
 ROADMAP / IDEAS
