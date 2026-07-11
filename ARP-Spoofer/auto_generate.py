@@ -9,7 +9,7 @@ import sys
 
 init(autoreset=True)
 
-title = "ARP-SPOOFER - LTX74"
+title = "ARP-SPOOFER - LTX & Moka"
 if os.name == 'nt':
     os.system(f'title {title}')
 else:
@@ -25,66 +25,14 @@ def banner():
         ██╔══██║██╔══██╗██╔═══╝ ╚════╝╚════██║██╔═══╝ ██║   ██║██║   ██║██╔══╝  ██╔══╝  ██╔══██╗
         ██║  ██║██║  ██║██║           ███████║██║     ╚██████╔╝╚██████╔╝██║     ███████╗██║  ██║
         ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝           ╚══════╝╚═╝      ╚═════╝  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═╝
-                    Auto Command Generator - LTX74
+                    Auto Command Generator - By LTX & Moka
     """ + Style.RESET_ALL)
 
 def separator():
     print(Fore.CYAN + "────────────────────────────────────────────────────────────" + Style.RESET_ALL)
 
-def get_network_info():
-    ip_address = ""
-    gateway = ""
-    
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        ip_address = s.getsockname()[0]
-    except Exception:
-        ip_address = "127.0.0.1"
-    finally:
-        s.close()
-
-    try:
-        if platform.system() != "Windows":
-            cmd = "ip route | grep default"
-            output = subprocess.check_output(cmd, shell=True).decode().strip()
-            match = re.search(r'via\s+(\d+\.\d+\.\d+\.\d+)', output)
-            if match:
-                gateway = match.group(1)
-        else:
-            cmd = "route print 0.0.0.0"
-            output = subprocess.check_output(cmd, shell=True).decode('cp850')
-            lines = output.split('\n')
-            for line in lines:
-                if "0.0.0.0" in line and "Active Routes" not in line:
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        gateway = parts[2]
-                        break
-    except:
-        gateway = "NOT_FOUND"
-
-    if ip_address and ip_address != "127.0.0.1":
-        network_range = ".".join(ip_address.split('.')[:-1]) + ".0/24"
-    else:
-        network_range = "UNKNOWN"
-
-    return ip_address, gateway, network_range
-
 def main():
     banner()
-    
-    print(Fore.YELLOW + "[*] Detecting network configuration..." + Style.RESET_ALL)
-    time.sleep(1)
-
-    my_ip, gateway, net_range = get_network_info()
-
-    separator()
-    print(Fore.WHITE + "Detected Configuration:")
-    print(f" - Your IP:       {Fore.YELLOW}{my_ip}")
-    print(f" - Gateway:       {Fore.YELLOW}{gateway}")
-    print(f" - Network Range: {Fore.YELLOW}{net_range}")
-    separator()
 
     print(Fore.CYAN + "\n[MODE] Select operation:")
     print(Fore.WHITE + "  1. ARP Attack (spoof)")
@@ -97,32 +45,37 @@ def main():
         base_cmd = "python arp_spoofer.py --scan"
         if export:
             base_cmd += f" -o {export}"
+        iface = input(Fore.GREEN + "Select adapter with -i? (y/n): ").lower() == 'y'
+        if iface:
+            base_cmd += " -i"
     elif mode == "3":
         base_cmd = "python arp_spoofer.py --scan-wifi"
     else:
-        if gateway == "NOT_FOUND" or not re.match(r'\d+\.\d+\.\d+\.\d+', gateway):
-            print(Fore.RED + "[!] Error: Could not automatically detect the Gateway IP.")
-            gateway = input(Fore.WHITE + "[?] Enter Gateway manually (e.g. 192.168.1.1): ")
+        print(Fore.CYAN + "\n[NETWORK] Configuration mode:")
+        print(Fore.WHITE + "  1. Auto-detect (recommended)")
+        print(Fore.WHITE + "  2. Select adapter (-i)")
+        print(Fore.WHITE + "  3. Manual (-r / -g)")
+        net_mode = input(Fore.GREEN + "Choice (1/2/3) [1]: ").strip() or "1"
 
-        auto_detect = input(Fore.GREEN + "Auto-detect network (-r/-g optional)? (y/n) [y]: ").lower()
-        use_auto = auto_detect != 'n'
+        if net_mode == "2":
+            base_cmd = "python arp_spoofer.py -i"
+        elif net_mode == "3":
+            net_range = input(Fore.WHITE + "[?] Network range (e.g. 192.168.1.0/24): ").strip()
+            gateway = input(Fore.WHITE + "[?] Gateway IP (e.g. 192.168.1.1): ").strip()
+            base_cmd = f"python arp_spoofer.py --manual -r {net_range} -g {gateway}"
+            if input(Fore.GREEN + "Select adapter with -i? (y/n): ").lower() == 'y':
+                base_cmd += " -i"
+        else:
+            base_cmd = "python arp_spoofer.py"
 
         print(Fore.CYAN + "\n[OPTION] -a  (Auto Attack)")
-        print(Fore.WHITE + "Description: Spoof ALL devices on the network")
         use_a = input(Fore.GREEN + "Enable -a ? (y/n): ").lower() == 'y'
 
         print(Fore.CYAN + "\n[OPTION] -s  (Sniffer)")
-        print(Fore.WHITE + "Description: DNS/HTTP traffic sniffing")
         use_s = input(Fore.GREEN + "Enable -s ? (y/n): ").lower() == 'y'
 
         print(Fore.CYAN + "\n[OPTION] --no-recovery")
-        print(Fore.WHITE + "Description: Disable auto internet/WiFi recovery")
         no_recovery = input(Fore.GREEN + "Disable recovery? (y/n): ").lower() == 'y'
-
-        if use_auto:
-            base_cmd = "python arp_spoofer.py"
-        else:
-            base_cmd = f"python arp_spoofer.py -r {net_range} -g {gateway}"
 
         if use_a:
             base_cmd += " -a"

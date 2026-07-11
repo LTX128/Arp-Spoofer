@@ -1,206 +1,576 @@
-# ARP-SPOOFER - LTX74
-## Professional ARP Spoofing / MITM Framework
+# ARP-SPOOFER
 
-Author      : LTX74
-Language    : Python 3
-Platforms   : Windows / Linux
-Category    : Network Security / MITM
-Usage       : Educational & Authorized Testing Only
+**By LTX & Moka**
 
-----------------------------------------------------
-DISCLAIMER
-----------------------------------------------------
+A network-aware ARP spoofing framework for Windows with automatic recovery, WiFi management, adapter selection, traffic sniffing, and long-running session stability.
 
-⚠️  EDUCATIONAL USE ONLY ⚠️
+> **Disclaimer:** This tool is intended for **authorized security testing and educational purposes only**. Only use it on networks and systems you own or have explicit written permission to test.
 
-This tool is designed for:
-- Personal labs
-- Authorized pentesting
-- Network security learning
+---
 
-Any use on networks you do NOT own or do NOT have
-explicit permission to test is illegal.
+## Table of Contents
 
-The author (LTX74) assumes NO responsibility for misuse.
+- [Overview](#overview)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [CLI Reference](#cli-reference)
+- [Operation Modes](#operation-modes)
+- [Network Configuration](#network-configuration)
+- [ARP Attack](#arp-attack)
+- [Traffic Sniffing](#traffic-sniffing)
+- [Network Resilience Engine](#network-resilience-engine)
+- [WiFi Management](#wifi-management)
+- [Scanning](#scanning)
+- [Session Logging](#session-logging)
+- [Architecture](#architecture)
+- [Project Files](#project-files)
+- [Troubleshooting](#troubleshooting)
+- [Authors](#authors)
 
-----------------------------------------------------
-PROJECT OVERVIEW
-----------------------------------------------------
+---
 
-ARP-SPOOFER - LTX74 is a professional ARP spoofing
-and Man-In-The-Middle framework written in Python.
+## Overview
 
-The tool allows:
-- Full LAN discovery
-- ARP poisoning between targets and gateway
-- Optional DNS & HTTP traffic sniffing
-- Automatic or manual target selection
-- Clean restoration of the network on exit
+`arp_spoofer.py` is a Man-in-the-Middle (MITM) tool that performs **ARP cache poisoning** to intercept traffic between targets and the gateway on a local network. Unlike a basic ARP spoofer, this script is built to **run for extended periods** and **adapt to network changes** automatically.
 
-An additional helper script is included to
-automatically generate the correct attack commands
-based on your current network configuration.
+It was designed primarily for **Windows** and includes:
 
-----------------------------------------------------
-FEATURES
-----------------------------------------------------
+- Automatic UAC elevation (administrator privileges)
+- Per-adapter network detection (WiFi / Ethernet)
+- Manual configuration mode
+- Internet connectivity monitoring and auto-recovery
+- WiFi reconnect and captive portal handling
+- Live DNS and HTTP logging
+- Standalone network and WiFi scanning with export
 
-[+] Automatic network scanning (IP / MAC / Hostname)
-[+] Manual or auto attack mode
-[+] Multi-target support
-[+] DNS query logging
-[+] HTTP request logging
-[+] Auto gateway detection
-[+] Safe ARP table restoration
-[+] Clean CLI with colors & banner
-[+] Auto command generator script
+---
 
-----------------------------------------------------
-FILES
-----------------------------------------------------
+## Features
 
+| Category | Capabilities |
+|----------|-------------|
+| **ARP Spoofing** | Bidirectional poisoning (target ↔ gateway), multi-target support |
+| **Targeting** | Manual single target or auto-attack all devices (`-a`) |
+| **Sniffing** | Live DNS query and HTTP request logging (`-s`) |
+| **Network config** | Auto-detect, manual mode (`--manual`), adapter picker (`-i`) |
+| **Scanning** | ARP device scan (`--scan`), WiFi scan (`--scan-wifi`), JSON/CSV export |
+| **Recovery** | DHCP renew, IP change, MAC rotation, adapter reset, WiFi reconnect |
+| **WiFi** | Profile capture, smart reconnect, captive portal auto-accept |
+| **Stability** | Watchdog thread, target/MAC refresh, spoof failure recovery |
+| **Logging** | Session logs written to `logs/` directory |
+| **Windows** | UAC auto-elevation, PowerShell adapter detection, `wlanapi` native scan |
+
+---
+
+## Requirements
+
+| Requirement | Details |
+|-------------|---------|
+| **OS** | Windows 10/11 (primary). Limited Linux support. |
+| **Python** | 3.x |
+| **Npcap** | Required for packet capture (install via `setup.bat`) |
+| **Privileges** | Administrator (requested automatically via UAC) |
+| **Python packages** | `scapy`, `colorama` |
+
+---
+
+## Installation
+
+### 1. Clone or download the repository
+
+```bash
+git clone <your-repo-url>
+cd ARP_SPOOFER
+```
+
+### 2. Run the setup script
+
+```bash
+setup.bat
+```
+
+> Do **not** run `setup.bat` as Administrator.
+
+The setup script will:
+- Verify Python is installed
+- Install dependencies from `requirements.txt`
+- Launch the Npcap installer if not detected
+
+### 3. Launch the tool
+
+```bash
+start.bat
+```
+
+Or run directly:
+
+```bash
+python arp_spoofer.py -h
+```
+
+---
+
+## Quick Start
+
+### Interactive menu
+
+```bash
+start.bat
+```
+
+| Option | Action |
+|--------|--------|
+| `1` | ARP attack with auto-detection |
+| `2` | Scan network devices |
+| `3` | Scan WiFi networks |
+| `4` | Open command generator wizard |
+| `5` | Select adapter (`-i`) and attack |
+| `6` | Display help |
+
+### Common commands
+
+```bash
+# Scan all devices on the current network
+python arp_spoofer.py --scan
+
+# Select WiFi or Ethernet adapter, then attack all devices with sniffing
+python arp_spoofer.py -i -a -s
+
+# Manual configuration (no auto-detect)
+python arp_spoofer.py --manual -r 192.168.1.0/24 -g 192.168.1.1 -i -a
+
+# Full auto mode
+python arp_spoofer.py -a -s
+```
+
+---
+
+## CLI Reference
+
+| Argument | Description |
+|----------|-------------|
+| `--scan` | Scan devices on the network and exit |
+| `--scan-wifi` | Scan nearby WiFi networks and exit (Windows) |
+| `-o`, `--output` | Export scan results to `.json` or `.csv` |
+| `--log` | Write session events to a custom log file |
+| `-r`, `--range` | Network range (e.g. `192.168.1.0/24`) |
+| `-g`, `--gateway` | Gateway IP address |
+| `-a`, `--all` | Auto-target all devices on the network |
+| `-s`, `--sniff` | Enable live DNS/HTTP traffic sniffing |
+| `-i`, `--interface [N]` | List adapters and select one. Use `-i` for interactive, `-i 2` for direct selection |
+| `--manual` | Manual mode: disables auto-detect, requires `-r` and `-g` |
+| `--no-recovery` | Disable automatic internet/WiFi recovery |
+| `--no-elevate` | Skip automatic UAC administrator elevation |
+
+---
+
+## Operation Modes
+
+### 1. ARP Attack Mode (default)
+
+The main mode. Poisons ARP tables to position your machine between targets and the gateway.
+
+```bash
+python arp_spoofer.py -a -s
+```
+
+### 2. Device Scan Mode (`--scan`)
+
+Performs an ARP scan, displays a table of IP / MAC / hostname, then exits.
+
+```bash
+python arp_spoofer.py --scan
+python arp_spoofer.py --scan -o devices.json
+```
+
+### 3. WiFi Scan Mode (`--scan-wifi`)
+
+Scans nearby WiFi networks using the Windows WLAN API, displays SSID / BSSID / signal / auth, then exits.
+
+```bash
+python arp_spoofer.py --scan-wifi
+python arp_spoofer.py --scan-wifi -o wifi.json
+```
+
+---
+
+## Network Configuration
+
+The script supports three ways to configure the network:
+
+### Auto-detect (default)
+
+When `-r` and `-g` are not provided and `--manual` is not set:
+
+1. Lists all active network adapters via PowerShell (`Get-NetAdapter`, `Get-NetIPAddress`, `Get-NetRoute`)
+2. Filters out virtual adapters (VirtualBox, VMware, Hyper-V, VPN, etc.)
+3. Selects the **best adapter** (prioritizes adapters with a valid IP + gateway)
+4. Derives the subnet (actual prefix or `/24`) and gateway from that adapter
+5. Configures Scapy to use the matching capture interface
+
+### Manual mode (`--manual`)
+
+Disables all auto-detection. You must provide the network range and gateway yourself.
+
+```bash
+python arp_spoofer.py --manual -r 192.168.1.0/24 -g 192.168.1.1 -a -s
+```
+
+If `-r` or `-g` are missing, the script prompts you interactively.
+
+> **Tip:** Combine with `-i` to also select which adapter Scapy uses for packet capture.
+
+### Adapter selection (`-i`)
+
+Lists all available adapters in a table:
+
+```
++----+----------------------+--------------+----------------+----------------+--------------+
+| #  | Name                 | Type         | IP             | Gateway        | Status       |
++----+----------------------+--------------+----------------+----------------+--------------+
+| 1  | Wi-Fi                | WiFi         | 192.168.1.42   | 192.168.1.1    | Up           |
+| 2  | Ethernet             | Ethernet     | 10.0.0.5       | 10.0.0.1       | Up           |
++----+----------------------+--------------+----------------+----------------+--------------+
+```
+
+```bash
+# Interactive selection
+python arp_spoofer.py -i -a -s
+
+# Direct selection (adapter #2)
+python arp_spoofer.py -i 2 -a -s
+```
+
+The selected adapter determines:
+- Scapy capture interface
+- IP address and gateway used for auto-detect
+- WiFi profile context for recovery
+
+---
+
+## ARP Attack
+
+### How it works
+
+For each target, the script sends spoofed ARP replies:
+
+1. **To the target:** "The gateway IP is at **my MAC address**"
+2. **To the gateway:** "The target IP is at **my MAC address**"
+
+Traffic flows through your machine, enabling interception and sniffing.
+
+### Target selection
+
+| Mode | Behavior |
+|------|----------|
+| **Default** | ARP scan → display device table → you pick one IP |
+| **`-a` (auto)** | Silently scans and attacks all devices except the gateway |
+
+### Live status bar
+
+During the attack, a real-time status line is displayed:
+
+```
+Packets: 126 | Targets: 21 | Internet: ONLINE | Uptime: 00:15:33 | Ctrl+C to stop
+```
+
+### Clean exit
+
+Press `Ctrl+C` to stop. The script sends restoration ARP packets to all targets and the gateway to restore normal network operation.
+
+### Background maintenance
+
+| Task | Interval | Description |
+|------|----------|-------------|
+| Watchdog | 30s | Checks gateway, internet, triggers recovery |
+| Target refresh | 5 min | Detects new devices (auto-attack mode) |
+| MAC refresh | 3 min | Re-resolves ARP for all targets |
+| Spoof failure recovery | Per cycle | Re-fetches MAC after 5 consecutive failures |
+
+---
+
+## Traffic Sniffing
+
+Enable with `-s`. The sniffer runs in a background thread and logs:
+
+### DNS Log
+
+Captures **DNS queries only** (not responses). Filters out empty or invalid names.
+
+```
+[DNS LOG] www.google.com
+[DNS LOG] _bose-passport._tcp.local
+```
+
+Filtering rules:
+- Only DNS requests (`qr == 0`)
+- Skips empty, root, or invalid domain names
+- Strips trailing dots and non-printable characters
+
+### WEB Log
+
+Captures HTTP requests (unencrypted):
+
+```
+[WEB LOG] example.com/path/to/page
+```
+
+---
+
+## Network Resilience Engine
+
+The `NetworkResilience` class monitors connectivity and recovers automatically when the network drops or your IP gets blacklisted.
+
+### Internet detection
+
+Checks connectivity using:
+- TCP probes to public DNS servers (`8.8.8.8`, `1.1.1.1`, `208.67.222.222`)
+- HTTP probes to standard connectivity check URLs (Google, Microsoft, Apple)
+
+Results are cached for **15 seconds** to reduce overhead.
+
+### Recovery pipeline
+
+When internet or gateway is lost, the following methods are tried in order:
+
+| Step | Method | Description |
+|------|--------|-------------|
+| 1 | **DHCP Renew** | Reset to DHCP, release/renew IP, flush DNS |
+| 2 | **Local IP Change** | Assign a random static IP in the current subnet |
+| 3 | **MAC Rotation** | Randomize adapter MAC via Windows registry |
+| 4 | **Adapter Reset** | Disable and re-enable the network interface |
+| 5 | **WiFi Reconnect** | Reconnect to the original WiFi using saved credentials |
+| 6 | **WiFi Scan & Connect** | Scan nearby networks and connect to the best match |
+
+A **120-second cooldown** prevents aggressive recovery loops.
+
+### Captive portal handling
+
+For public WiFi networks, the script attempts to auto-accept terms through:
+1. HTML form submission (accept/agree/connect buttons)
+2. Link clicking on portal pages
+3. Fallback POST requests to common portal paths
+
+### Recovery flow
+
+```
+Internet / Gateway lost
+        |
+        v
+[Cooldown check - 120s minimum]
+        |
+        v
+1. DHCP release / renew
+        |-- fail
+        v
+2. Change local IP (random host in subnet)
+        |-- fail
+        v
+3. Rotate MAC address
+        |-- fail
+        v
+4. Reset network adapter
+        |-- fail
+        v
+5. Reconnect to original WiFi
+        |-- fail
+        v
+6. Scan WiFi and connect to best candidate
+        |
+        v
+[Captive portal check and auto-accept]
+        |
+        v
+Resume spoofing
+```
+
+Disable recovery with `--no-recovery`.
+
+---
+
+## WiFi Management
+
+### Profile capture at startup
+
+When connected via WiFi, the script saves:
+- SSID, interface name, authentication type
+- Password (from Windows stored profile via `netsh wlan show profile key=clear`)
+
+### Smart WiFi reconnect
+
+When scanning for alternative networks, candidates are ranked by:
+
+1. Exact SSID match with the original network
+2. Similar SSID (partial name match)
+3. Same BSSID OUI (same router/AP vendor prefix)
+4. Open networks
+5. Signal strength
+
+For secured networks, the saved WiFi password is reused. For open networks, a Windows WLAN profile is created automatically.
+
+Supported authentication: **Open**, **WPA/WPA2-PSK**, **WPA3-SAE**.
+
+### Native WiFi scanner
+
+`--scan-wifi` uses the Windows `wlanapi.dll` API for live radio scanning:
+- Triggers `WlanScan` on each active adapter
+- Reads BSS list and available network list
+- Falls back to `netsh wlan show networks` if the API returns no results
+
+---
+
+## Scanning
+
+### Device scan (`--scan`)
+
+Sends ARP requests across the subnet and resolves hostnames.
+
+```bash
+python arp_spoofer.py --scan -o devices.json   # JSON export
+python arp_spoofer.py --scan -o devices.csv    # CSV export
+```
+
+### WiFi scan (`--scan-wifi`)
+
+```bash
+python arp_spoofer.py --scan-wifi -o wifi.json
+```
+
+---
+
+## Session Logging
+
+All events are logged automatically to:
+
+```
+logs/session_YYYYMMDD_HHMMSS.log
+```
+
+Custom path with `--log`:
+
+```bash
+python arp_spoofer.py -a -s --log my_session.log
+```
+
+**Log format:**
+
+```
+[2026-07-11 14:30:01] [INFO] Session started
+[2026-07-11 14:30:02] [INFO] Auto-selected adapter: Wi-Fi (WiFi)
+[2026-07-11 14:30:03] [INFO] Network: 192.168.1.0/24 | Gateway: 192.168.1.1
+[2026-07-11 14:45:12] [WARN] No internet access detected.
+[2026-07-11 14:45:20] [OK] Connectivity restored via _method_dhcp_renew.
+```
+
+---
+
+## Administrator Elevation
+
+On Windows, the script automatically triggers a **UAC prompt** at startup if not already running as admin.
+
+```bash
+python arp_spoofer.py -a -s              # UAC prompt appears automatically
+python arp_spoofer.py -a --no-elevate    # Skip elevation (limited functionality)
+```
+
+---
+
+## Architecture
+
+```
 arp_spoofer.py
----------------
-Main ARP spoofing & MITM tool.
+|
+|-- Network Configuration
+|   |-- get_network_adapters()       PowerShell adapter enumeration
+|   |-- get_best_adapter()           Auto-select best adapter
+|   |-- pick_network_adapter()       Interactive adapter selection (-i)
+|   |-- configure_network()          Resolves auto / manual / -i modes
+|   |-- setup_scapy_iface()          Binds Scapy to the correct interface
+|
+|-- NativeWifiScanner
+|   |-- scan()                       Live WiFi scan via wlanapi.dll
+|   |-- _parse_bss_list()            Parse BSS entries
+|   |-- _read_available_networks()   Read auth types per SSID
+|
+|-- NetworkResilience
+|   |-- has_internet()               TCP + HTTP connectivity probes
+|   |-- recover_connectivity()       Multi-step recovery pipeline
+|   |-- handle_captive_portal()      Auto-accept public WiFi portals
+|   |-- capture_initial_wifi()       Save WiFi profile at startup
+|   |-- scan_wifi_networks()         WiFi scan (native + netsh fallback)
+|   |-- _method_dhcp_renew()         DHCP release/renew
+|   |-- _method_change_local_ip()    Random static IP assignment
+|   |-- _method_randomize_mac()      MAC address rotation
+|   |-- _method_adapter_reset()      Disable/enable adapter
+|   |-- _method_wifi_reconnect()     Reconnect to saved WiFi
+|   |-- _method_wifi_scan_and_connect()  Scan and connect to best network
+|
+|-- SpoofSession
+|   |-- setup_targets()              Manual or auto target selection
+|   |-- spoof_cycle()                Send ARP poison packets
+|   |-- watchdog_loop()              Background monitoring thread
+|   |-- refresh_targets_if_needed()  Detect new devices every 5 min
+|   |-- refresh_target_macs()        Re-resolve MACs every 3 min
+|   |-- verify_gateway()             Gateway ARP reachability check
+|   |-- _restore()                   Clean ARP restoration on exit
+|
+|-- Traffic Sniffing
+|   |-- process_packet()             DNS + HTTP packet handler
+|   |-- _extract_dns_queries()       Filter valid DNS query names
+|   |-- _decode_http_field()         Decode HTTP Host/Path fields
+|
+|-- SessionLogger
+|   |-- write()                      Timestamped event logging
+|
+|-- Utilities
+    |-- request_admin_elevation()    UAC auto-elevation
+    |-- get_mac()                    ARP resolution with retries
+    |-- silent_scan() / visual_scan()  Network device discovery
+    |-- export_scan_results()        JSON/CSV device export
+    |-- export_wifi_results()        JSON/CSV WiFi export
+    |-- safe_print()                 Windows console-safe output
+```
 
-auto_generate.py
-----------------
-Automatically detects:
-- Your IP address
-- Default gateway
-- Network range
+### Data classes
 
-Then generates ready-to-use commands
-and can directly launch ARP-SPOOFER.
+| Class | Purpose |
+|-------|---------|
+| `NetworkAdapter` | Network interface (name, type, IP, gateway, prefix) |
+| `NetworkContext` | Runtime network state (IP, gateway, WiFi profile, interface) |
+| `WifiNetwork` | WiFi scan result (SSID, BSSID, signal, auth) |
 
-----------------------------------------------------
-REQUIREMENTS
-----------------------------------------------------
+---
 
-Python 3.8+
+## Project Files
 
-Python modules:
-- scapy
-- colorama
+| File | Description |
+|------|-------------|
+| `arp_spoofer.py` | Main script |
+| `auto_generate.py` | Interactive command builder wizard |
+| `start.bat` | Main menu launcher |
+| `scan.bat` | Quick network scan launcher |
+| `setup.bat` | Dependency and Npcap installer |
+| `requirements.txt` | Python dependencies |
+| `logs/` | Session log directory (created at runtime) |
 
-----------------------------------------------------
-PLATFORM NOTES
-----------------------------------------------------
+---
 
-Windows:
-- Install Npcap
-- Enable "WinPcap compatible mode"
-- Run terminal as Administrator
+## Troubleshooting
 
-Linux:
-- Run as root
-- IP forwarding is enabled automatically
+| Problem | Solution |
+|---------|----------|
+| Wrong gateway / subnet detected | Use `-i` to select the correct adapter, or `--manual -r -g` |
+| ARP spoofing not working | Run as Administrator (accept UAC prompt) |
+| No packets captured | Install Npcap with "WinPcap API-compatible Mode" |
+| WiFi scan returns nothing | Enable Location Services in Windows Privacy settings |
+| Empty DNS logs | Only valid DNS queries are logged (fixed in latest version) |
+| UAC prompt denied | Right-click terminal → Run as administrator |
+| Virtual adapter selected | Use `-i` to manually pick WiFi or Ethernet |
 
-----------------------------------------------------
-INSTALLATION
-----------------------------------------------------
+---
 
-1) Clone repository
--------------------
-git clone https://github.com/LTX128/Arp-Spoofer.git
-cd ARP-SPOOFER-LTX74
+## Authors
 
-2) Install dependencies
------------------------
-pip install scapy colorama
-
-3) (Windows only) Install Npcap
--------------------------------
-https://npcap.com/download/
-
-----------------------------------------------------
-USAGE - ARP SPOOFER
-----------------------------------------------------
-
-Basic syntax:
--------------
-python arp_spoofer.py -r <NETWORK_RANGE> -g <GATEWAY>
-
-Examples:
----------
-
-Manual target selection:
-python arp_spoofer.py -r 192.168.1.0/24 -g 192.168.1.1
-
-Auto attack all devices:
-python arp_spoofer.py -r 192.168.1.0/24 -g 192.168.1.1 -a
-
-Auto attack + sniff traffic:
-python arp_spoofer.py -r 192.168.1.0/24 -g 192.168.1.1 -a -s
-
-----------------------------------------------------
-ARGUMENTS
-----------------------------------------------------
-
--r, --range     Network range (CIDR)
--g, --gateway   Gateway IP address
--a, --all       Attack all devices automatically
--s, --sniff     Enable DNS & HTTP sniffing
-
-----------------------------------------------------
-USAGE - AUTO GENERATOR
-----------------------------------------------------
-
-Run:
-----
-python auto_generate.py
-
-The script will:
-- Detect your IP
-- Detect your gateway
-- Detect network range
-- Generate correct ARP-SPOOFER commands
-- Optionally launch the attack automatically
-
-Recommended for beginners or quick setup.
-
-----------------------------------------------------
-STOPPING THE ATTACK
-----------------------------------------------------
-
-Press CTRL + C
-
-ARP-SPOOFER will:
-- Stop poisoning
-- Restore ARP tables
-- Exit safely
-
-----------------------------------------------------
-LIMITATIONS
-----------------------------------------------------
-
-- HTTPS content cannot be decrypted
-- Some routers detect ARP spoofing
-
-----------------------------------------------------
-ROADMAP / IDEAS
-----------------------------------------------------
-
-- HTTPS SNI logging
-- Device vendor detection
-- Defensive detection mode
-- Plugin system
-- GUI interface
-
-----------------------------------------------------
-LICENSE
-----------------------------------------------------
-
-Educational license.
-Code can be studied and modified.
-Malicious or illegal usage is forbidden.
-
-----------------------------------------------------
-AUTHOR
-----------------------------------------------------
-
-Made by LTX74
-ARP-SPOOFER Project
-
-Learn • Test • Secure
-====================================================
+**LTX & Moka**

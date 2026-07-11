@@ -1,5 +1,5 @@
 @echo off
-title ARP_SPOOFER - Setup - LTX
+title ARP_SPOOFER - Setup - LTX & Moka
 color 5
 
 net session >nul 2>&1
@@ -16,7 +16,7 @@ if %errorlevel% equ 0 (
 
 echo.
 echo ============================================
-echo        ARP_SPOOFER - Setup - LTX
+echo        ARP_SPOOFER - Setup - LTX & Moka
 echo ============================================
 echo.
 

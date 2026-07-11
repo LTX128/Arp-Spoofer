@@ -12,6 +12,7 @@ import re
 import random
 import tempfile
 import json
+import ipaddress
 import atexit
 import logging
 import warnings
@@ -43,7 +44,7 @@ if os.name == "nt":
 
 _session_logger: Optional["SessionLogger"] = None
 
-title = "ARP-SPOOFER - LTX74"
+title = "ARP-SPOOFER - LTX & Moka"
 if os.name == "nt":
     os.system(f"title {title}")
 else:
@@ -57,6 +58,37 @@ INTERNET_CHECK_TIMEOUT = 5
 INTERNET_CACHE_TTL = 15
 RECOVERY_COOLDOWN = 120
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+
+
+@dataclass
+class NetworkAdapter:
+    index: int
+    name: str
+    description: str
+    adapter_type: str
+    mac: str
+    ip: str
+    gateway: str
+    prefix: int
+    status: str
+
+    @property
+    def ip_range(self) -> str:
+        if not self.ip or not re.match(r"\d+\.\d+\.\d+\.\d+", self.ip):
+            return ""
+        try:
+            if self.prefix and 0 < self.prefix <= 32:
+                return str(ipaddress.ip_interface(f"{self.ip}/{self.prefix}").network)
+            return ".".join(self.ip.split(".")[:-1]) + ".0/24"
+        except ValueError:
+            return ".".join(self.ip.split(".")[:-1]) + ".0/24"
+
+
+VIRTUAL_ADAPTER_KEYWORDS = (
+    "virtualbox", "vmware", "hyper-v", "vethernet", "loopback", "vpn",
+    "tap-windows", "wintun", "npcap", "bluetooth", "pseudo", "tunnel",
+    "miniport", "isatap", "teredo", "6to4",
+)
 
 
 @dataclass
@@ -107,7 +139,7 @@ def print_banner():
     ]
     for i, line in enumerate(lines):
         safe_print(get_gradient_color(i, len(lines)) + line)
-    safe_print(f"\n{Fore.MAGENTA}{Style.BRIGHT}ARP-SPOOFER | By LTX")
+    safe_print(f"\n{Fore.MAGENTA}{Style.BRIGHT}ARP-SPOOFER | By LTX & Moka")
 
 
 def normalize_netsh_text(text: str) -> str:
@@ -130,23 +162,235 @@ def powershell_value(command: str) -> str:
     return out.strip() if ok else ""
 
 
-def setup_scapy_iface():
+def setup_scapy_iface(adapter_name: str = ""):
     try:
-        if os.name == "nt":
+        alias = adapter_name
+        if not alias and os.name == "nt":
             alias = powershell_value(
                 "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | "
+                "Where-Object { $_.NextHop -ne '0.0.0.0' } | "
                 "Sort-Object RouteMetric | Select-Object -First 1).InterfaceAlias"
             )
-            if alias:
-                for iface in scapy.get_if_list():
-                    if alias.lower() in iface.lower() or iface.lower() in alias.lower():
-                        conf.iface = iface
-                        return
+        if alias:
+            for iface in scapy.get_if_list():
+                if alias.lower() in iface.lower() or iface.lower() in alias.lower():
+                    conf.iface = iface
+                    return iface
         route = scapy.conf.route.route("0.0.0.0")
         if route and len(route) > 3 and route[3]:
             conf.iface = route[3]
+            return route[3]
     except Exception:
         pass
+    return None
+
+
+def _is_virtual_adapter(description: str, name: str) -> bool:
+    text = f"{description} {name}".lower()
+    return any(k in text for k in VIRTUAL_ADAPTER_KEYWORDS)
+
+
+def _adapter_type_from_desc(description: str) -> str:
+    desc = description.lower()
+    if re.search(r"wi-?fi|wireless|802\.11", desc):
+        return "WiFi"
+    if re.search(r"ethernet|gigabit|lan|realtek|intel.*network", desc):
+        return "Ethernet"
+    return "Other"
+
+
+def get_network_adapters(include_down: bool = False) -> list[NetworkAdapter]:
+    if os.name != "nt":
+        return []
+
+    status_filter = "" if include_down else "| Where-Object { $_.Status -eq 'Up' }"
+    ps = (
+        f"$rows = @(); Get-NetAdapter {status_filter} | ForEach-Object {{ "
+        f"$n = $_.Name; $d = $_.InterfaceDescription; "
+        f"$ipObj = Get-NetIPAddress -InterfaceAlias $n -AddressFamily IPv4 "
+        f"-ErrorAction SilentlyContinue | "
+        f"Where-Object {{ $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' }} | "
+        f"Select-Object -First 1; "
+        f"$ip = if ($ipObj) {{ $ipObj.IPAddress }} else {{ '' }}; "
+        f"$pfx = if ($ipObj) {{ $ipObj.PrefixLength }} else {{ 24 }}; "
+        f"$gw = (Get-NetRoute -InterfaceAlias $n -DestinationPrefix '0.0.0.0/0' "
+        f"-ErrorAction SilentlyContinue | Sort-Object RouteMetric | "
+        f"Select-Object -First 1 -ExpandProperty NextHop); "
+        f"$t = if ($d -match 'Wi-?Fi|Wireless|802\\.11') {{ 'WiFi' }} "
+        f"elseif ($d -match 'Ethernet|Gigabit|LAN') {{ 'Ethernet' }} else {{ 'Other' }}; "
+        f"$rows += [PSCustomObject]@{{Name=$n;Description=$d;Type=$t;IP=$ip;"
+        f"Gateway=$gw;MAC=$_.MacAddress;Prefix=$pfx;Status=$_.Status}} }}; "
+        f"$rows | ConvertTo-Json -Compress"
+    )
+    ok, out = run_cmd(f'powershell -NoProfile -Command "{ps}"')
+    if not ok or not out.strip():
+        return []
+
+    try:
+        data = json.loads(out)
+        if isinstance(data, dict):
+            data = [data]
+    except json.JSONDecodeError:
+        return []
+
+    adapters = []
+    idx = 1
+    for row in data:
+        desc = str(row.get("Description", "") or "")
+        name = str(row.get("Name", "") or "")
+        if _is_virtual_adapter(desc, name):
+            continue
+        ip = str(row.get("IP", "") or "").strip()
+        gateway = str(row.get("Gateway", "") or "").strip()
+        if gateway and not re.match(r"\d+\.\d+\.\d+\.\d+", gateway):
+            gateway = ""
+        adapters.append(
+            NetworkAdapter(
+                index=idx,
+                name=name,
+                description=desc,
+                adapter_type=str(row.get("Type", "") or _adapter_type_from_desc(desc)),
+                mac=str(row.get("MAC", "") or "").replace("-", ":").lower(),
+                ip=ip,
+                gateway=gateway,
+                prefix=int(row.get("Prefix", 24) or 24),
+                status=str(row.get("Status", "") or "Up"),
+            )
+        )
+        idx += 1
+    return adapters
+
+
+def display_network_adapters(adapters: list[NetworkAdapter]):
+    if not adapters:
+        log_warn("No network adapters found.")
+        return
+    safe_print(f"\n{Fore.WHITE}+{'-' * 4}+{'-' * 22}+{'-' * 14}+{'-' * 16}+{'-' * 16}+{'-' * 16}+")
+    safe_print(
+        f"{Fore.WHITE}| {'#':<2} | {'Name':<20} | {'Type':<12} | "
+        f"{'IP':<14} | {'Gateway':<14} | {'Status':<14} |"
+    )
+    safe_print(f"{Fore.WHITE}+{'-' * 4}+{'-' * 22}+{'-' * 14}+{'-' * 16}+{'-' * 16}+{'-' * 16}+")
+    for a in adapters:
+        ip = a.ip or "N/A"
+        gw = a.gateway or "N/A"
+        safe_print(
+            f"{Fore.WHITE}| {Fore.CYAN}{a.index:<2}{Fore.WHITE} | "
+            f"{a.name[:20]:<20} | {Fore.GREEN}{a.adapter_type:<12}{Fore.WHITE} | "
+            f"{ip:<14} | {gw:<14} | {a.status:<14} |"
+        )
+    safe_print(f"{Fore.WHITE}+{'-' * 4}+{'-' * 22}+{'-' * 14}+{'-' * 16}+{'-' * 16}+{'-' * 16}+")
+
+
+def pick_network_adapter(adapters: list[NetworkAdapter], choice: Optional[str]) -> Optional[NetworkAdapter]:
+    if not adapters:
+        return None
+    if choice is None or choice == "__interactive__":
+        display_network_adapters(adapters)
+        raw = input(f"\n{Fore.WHITE}[?] Select adapter number (1-{len(adapters)}): ").strip()
+        if not raw.isdigit():
+            log_err("Invalid selection.")
+            return None
+        choice = raw
+    if not str(choice).isdigit():
+        log_err("Invalid adapter index.")
+        return None
+    num = int(choice)
+    for a in adapters:
+        if a.index == num:
+            return a
+    log_err(f"Adapter #{num} not found.")
+    return None
+
+
+def get_best_adapter() -> Optional[NetworkAdapter]:
+    adapters = get_network_adapters()
+    if not adapters:
+        return None
+
+    def score(a: NetworkAdapter) -> tuple:
+        has_ip = 1 if a.ip and re.match(r"\d+\.\d+\.\d+\.\d+", a.ip) else 0
+        has_gw = 1 if a.gateway and re.match(r"\d+\.\d+\.\d+\.\d+", a.gateway) else 0
+        type_bonus = 1 if a.adapter_type in ("WiFi", "Ethernet") else 0
+        return (has_gw, has_ip, type_bonus)
+
+    return max(adapters, key=score)
+
+
+def prompt_manual_network() -> tuple[str, str]:
+    log_info("Manual mode - enter network settings.")
+    ip_range = input(f"{Fore.WHITE}[?] Network range (e.g. 192.168.1.0/24): ").strip()
+    gateway = input(f"{Fore.WHITE}[?] Gateway IP (e.g. 192.168.1.1): ").strip()
+    return ip_range, gateway
+
+
+def configure_network(args) -> Optional[NetworkAdapter]:
+    selected: Optional[NetworkAdapter] = None
+    adapters = get_network_adapters()
+
+    if args.interface is not None:
+        selected = pick_network_adapter(adapters, args.interface)
+        if not selected:
+            sys.exit(1)
+        log_ok(f"Selected adapter: {selected.name} ({selected.adapter_type})")
+        setup_scapy_iface(selected.name)
+
+    if args.manual:
+        if not args.ip_range or not args.gateway:
+            args.ip_range, args.gateway = prompt_manual_network()
+        if not args.ip_range or not args.gateway:
+            log_err("Manual mode requires -r and -g (network range and gateway).")
+            sys.exit(1)
+        if not re.match(r"\d+\.\d+\.\d+\.\d+", args.gateway):
+            log_err("Invalid gateway IP.")
+            sys.exit(1)
+        if selected:
+            return selected
+        best = get_best_adapter()
+        if best:
+            setup_scapy_iface(best.name)
+            log_info(f"Using adapter for capture: {best.name} ({best.adapter_type})")
+            return best
+        setup_scapy_iface()
+        if adapters:
+            log_warn("Manual mode: use -i to select the network adapter for packet capture.")
+        return None
+
+    if selected:
+        if not args.ip_range:
+            args.ip_range = selected.ip_range
+        if not args.gateway:
+            args.gateway = selected.gateway
+    else:
+        best = get_best_adapter()
+        if best:
+            selected = best
+            setup_scapy_iface(best.name)
+            if not args.ip_range:
+                args.ip_range = best.ip_range
+            if not args.gateway:
+                args.gateway = best.gateway
+            log_info(f"Auto-selected adapter: {best.name} ({best.adapter_type})")
+
+    if not args.ip_range or not args.gateway:
+        resilience = NetworkResilience(NetworkContext())
+        ip, gateway, ip_range = resilience._detect_network(
+            interface_name=selected.name if selected else ""
+        )
+        if not args.ip_range:
+            args.ip_range = ip_range
+        if not args.gateway:
+            args.gateway = gateway
+
+    if not args.ip_range or not args.gateway:
+        log_err("Could not detect network. Use --manual with -r/-g or -i to select an adapter.")
+        sys.exit(1)
+
+    if args.ip_range == "UNKNOWN" or not re.match(r"\d+\.\d+\.\d+\.\d+", args.gateway):
+        log_err("Invalid network configuration detected.")
+        sys.exit(1)
+
+    return selected
 
 
 def run_cmd(cmd, timeout=30, encoding=None):
@@ -1296,21 +1540,51 @@ class NetworkResilience:
         self.refresh_context()
         return bool(self.ctx.gateway and self.ctx.gateway_mac)
 
-    def _detect_network(self) -> tuple[str, str, str]:
+    def _detect_network(self, interface_name: str = "") -> tuple[str, str, str]:
+        iface = interface_name or self.ctx.interface_name
         ip_address = ""
         gateway = ""
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            ip_address = s.getsockname()[0]
-        except OSError:
-            ip_address = ""
-        finally:
-            s.close()
 
-        if os.name == "nt":
+        if os.name == "nt" and iface:
+            ip_address = powershell_value(
+                f"$a = Get-NetIPAddress -InterfaceAlias '{iface}' -AddressFamily IPv4 "
+                f"-ErrorAction SilentlyContinue | "
+                f"Where-Object {{ $_.IPAddress -notlike '169.254.*' }} | "
+                f"Select-Object -First 1; if ($a) {{ $a.IPAddress }}"
+            )
+            gateway = powershell_value(
+                f"(Get-NetRoute -InterfaceAlias '{iface}' -DestinationPrefix '0.0.0.0/0' "
+                f"-ErrorAction SilentlyContinue | Sort-Object RouteMetric | "
+                f"Select-Object -First 1).NextHop"
+            )
+            prefix = powershell_value(
+                f"$a = Get-NetIPAddress -InterfaceAlias '{iface}' -AddressFamily IPv4 "
+                f"-ErrorAction SilentlyContinue | "
+                f"Where-Object {{ $_.IPAddress -notlike '169.254.*' }} | "
+                f"Select-Object -First 1; if ($a) {{ $a.PrefixLength }}"
+            )
+            if ip_address and re.match(r"\d+\.\d+\.\d+\.\d+", ip_address):
+                try:
+                    pfx = int(prefix) if prefix.isdigit() else 24
+                    ip_range = str(ipaddress.ip_interface(f"{ip_address}/{pfx}").network)
+                    return ip_address, gateway, ip_range
+                except ValueError:
+                    pass
+
+        if not ip_address:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("8.8.8.8", 80))
+                ip_address = s.getsockname()[0]
+            except OSError:
+                ip_address = ""
+            finally:
+                s.close()
+
+        if os.name == "nt" and not gateway:
             gateway = powershell_value(
                 "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | "
+                "Where-Object { $_.NextHop -ne '0.0.0.0' } | "
                 "Sort-Object RouteMetric | Select-Object -First 1).NextHop"
             )
             if not gateway or not re.match(r"\d+\.\d+\.\d+\.\d+", gateway):
@@ -1322,7 +1596,7 @@ class NetworkResilience:
                             if re.match(r"\d+\.\d+\.\d+\.\d+", parts[2]):
                                 gateway = parts[2]
                                 break
-        else:
+        elif not gateway:
             ok, output = run_cmd("ip route | grep default")
             if ok:
                 match = re.search(r"via\s+(\d+\.\d+\.\d+\.\d+)", output)
@@ -1409,7 +1683,7 @@ class NetworkResilience:
 
 def get_arguments():
     parser = argparse.ArgumentParser(
-        description=f"{Fore.LIGHTMAGENTA_EX}ARP-SPOOFER By LTX: Professional MITM Framework.",
+        description=f"{Fore.LIGHTMAGENTA_EX}ARP-SPOOFER By LTX & Moka: Professional MITM Framework.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 {Fore.LIGHTCYAN_EX}EXAMPLES:
@@ -1418,7 +1692,9 @@ def get_arguments():
   {Fore.WHITE}python arp_spoofer.py --scan-wifi
   {Fore.WHITE}python arp_spoofer.py --scan-wifi -o wifi.json
   {Fore.WHITE}python arp_spoofer.py -a -s
-  {Fore.WHITE}python arp_spoofer.py -r 192.168.1.0/24 -g 192.168.1.1 -a -s
+  {Fore.WHITE}python arp_spoofer.py --manual -r 192.168.1.0/24 -g 192.168.1.1 -i
+  {Fore.WHITE}python arp_spoofer.py -i -a -s
+  {Fore.WHITE}python arp_spoofer.py -i 2 -a -s
 
 {Fore.LIGHTMAGENTA_EX}NOTES:
   - Use --scan to list devices on the current network and exit.
@@ -1426,7 +1702,9 @@ def get_arguments():
   - Use -o/--output to export scan results (.json or .csv) for --scan and --scan-wifi.
   - Use -a to attack everyone on the network automatically.
   - Use -s to enable the live DNS/HTTP traffic sniffer.
-  - Auto-detects gateway/range if -r/-g omitted (Windows).
+  - Use -i to list and select a network adapter (WiFi / Ethernet).
+  - Use --manual to disable auto-detect (requires -r and -g).
+  - Auto-detects gateway/range from the selected or best adapter (Windows).
   - Auto-recovery: DHCP, IP change, MAC rotate, WiFi reconnect, captive portal.
   - Automatically requests administrator elevation via UAC on Windows.
         """,
@@ -1460,6 +1738,19 @@ def get_arguments():
     )
     parser.add_argument(
         "-s", "--sniff", action="store_true", help="Enable live traffic sniffing (DNS/HTTP)"
+    )
+    parser.add_argument(
+        "-i", "--interface",
+        nargs="?",
+        const="__interactive__",
+        default=None,
+        metavar="N",
+        help="List network adapters and select one (optional index, e.g. -i 2)",
+    )
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="Manual mode: no auto-detect, requires -r and -g",
     )
     parser.add_argument(
         "--no-recovery",
@@ -1808,7 +2099,7 @@ class SpoofSession:
         watchdog = threading.Thread(target=self.watchdog_loop, daemon=True)
         watchdog.start()
 
-        safe_print(f"\n{Fore.RED}[!] BY LTX - ATTACK ACTIVE")
+        safe_print(f"\n{Fore.RED}[!] BY LTX & Moka - ATTACK ACTIVE")
         try:
             while True:
                 self.spoof_cycle()
@@ -1846,31 +2137,20 @@ class SpoofSession:
             log_err("Error during restoration.")
 
 
-def resolve_network_args(args) -> tuple[str, str]:
-    resilience = NetworkResilience(NetworkContext())
-    resilience.capture_initial_wifi()
-    ip, gateway, ip_range = resilience._detect_network()
-
-    if not args.ip_range:
-        args.ip_range = ip_range
-    if not args.gateway:
-        args.gateway = gateway
-
+def resolve_network_args(args, selected: Optional[NetworkAdapter] = None) -> tuple[str, str]:
     if not args.ip_range or not args.gateway:
-        log_err("Could not auto-detect network. Provide -r and -g manually.")
+        log_err("Missing network range (-r) or gateway (-g).")
         sys.exit(1)
-
     if args.ip_range == "UNKNOWN" or not re.match(r"\d+\.\d+\.\d+\.\d+", args.gateway):
         log_err("Invalid network configuration detected.")
         sys.exit(1)
-
     return args.ip_range, args.gateway
 
 
 def run_scan_mode(args):
-    setup_scapy_iface()
-    ip_range, _ = resolve_network_args(args)
     print_banner()
+    selected = configure_network(args)
+    ip_range, _ = resolve_network_args(args, selected)
     log_info(f"Standalone scan mode - range: {ip_range}")
     devices = visual_scan(ip_range)
     if args.output and devices:
@@ -1913,16 +2193,22 @@ def main():
 
     init_session_logger(args.log_file)
 
-    setup_scapy_iface()
-    if conf.iface:
+    selected = configure_network(args)
+    if selected and conf.iface:
+        log_info(f"Network interface: {conf.iface} ({selected.name})")
+    elif conf.iface:
         log_info(f"Network interface: {conf.iface}")
 
-    args.ip_range, args.gateway = resolve_network_args(args)
+    args.ip_range, args.gateway = resolve_network_args(args, selected)
     log_info(f"Network: {args.ip_range} | Gateway: {args.gateway}")
 
     enable_ip_forwarding()
 
-    initial_ctx = NetworkContext(ip_range=args.ip_range, gateway=args.gateway)
+    initial_ctx = NetworkContext(
+        ip_range=args.ip_range,
+        gateway=args.gateway,
+        interface_name=selected.name if selected else "",
+    )
     resilience = NetworkResilience(initial_ctx)
     resilience.capture_initial_wifi()
     resilience.refresh_context()
@@ -1947,4 +2233,4 @@ if __name__ == "__main__":
     request_admin_elevation()
     main()
 
-# Made by LTX74
+# Made by LTX & Moka
