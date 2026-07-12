@@ -37,7 +37,6 @@ A network-aware ARP spoofing framework for Windows with automatic recovery, WiFi
 
 It was designed primarily for **Windows** and includes:
 
-- Automatic UAC elevation (administrator privileges)
 - Per-adapter network detection (WiFi / Ethernet)
 - Manual configuration mode
 - Internet connectivity monitoring and auto-recovery
@@ -60,7 +59,7 @@ It was designed primarily for **Windows** and includes:
 | **WiFi** | Profile capture, smart reconnect, captive portal auto-accept |
 | **Stability** | Watchdog thread, target/MAC refresh, spoof failure recovery |
 | **Logging** | Session logs written to `logs/` directory |
-| **Windows** | UAC auto-elevation, PowerShell adapter detection, `wlanapi` native scan |
+| **Windows** | PowerShell adapter detection, `wlanapi` native scan |
 
 ---
 
@@ -71,7 +70,7 @@ It was designed primarily for **Windows** and includes:
 | **OS** | Windows 10/11 (primary). Limited Linux support. |
 | **Python** | 3.x |
 | **Npcap** | Required for packet capture (install via `setup.bat`) |
-| **Privileges** | Administrator (requested automatically via UAC) |
+| **Privileges** | Administrator |
 | **Python packages** | `scapy`, `colorama` |
 
 ---
@@ -81,8 +80,8 @@ It was designed primarily for **Windows** and includes:
 ### 1. Clone or download the repository
 
 ```bash
-git clone <your-repo-url>
-cd ARP_SPOOFER
+git clone https://github.com/LTX128/Arp-Spoofer.git
+cd Arp_Soofer
 ```
 
 ### 2. Run the setup script
@@ -462,17 +461,6 @@ python arp_spoofer.py -a -s --log my_session.log
 [2026-07-11 14:30:03] [INFO] Network: 192.168.1.0/24 | Gateway: 192.168.1.1
 [2026-07-11 14:45:12] [WARN] No internet access detected.
 [2026-07-11 14:45:20] [OK] Connectivity restored via _method_dhcp_renew.
-```
-
----
-
-## Administrator Elevation
-
-On Windows, the script automatically triggers a **UAC prompt** at startup if not already running as admin.
-
-```bash
-python arp_spoofer.py -a -s              # UAC prompt appears automatically
-python arp_spoofer.py -a --no-elevate    # Skip elevation (limited functionality)
 ```
 
 ---
