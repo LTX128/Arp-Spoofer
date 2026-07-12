@@ -81,8 +81,8 @@ It was designed primarily for **Windows** and includes:
 ### 1. Clone or download the repository
 
 ```bash
-git clone <your-repo-url>
-cd ARP_SPOOFER
+git clone https://github.com/LTX128/Arp-Spoofer.git
+cd Arp_Soofer
 ```
 
 ### 2. Run the setup script
