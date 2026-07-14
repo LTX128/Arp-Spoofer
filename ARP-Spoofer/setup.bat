@@ -1,5 +1,6 @@
 @echo off
-title ARP_SPOOFER - Setup - LTX ^& Moka
+setlocal EnableExtensions
+title "ARP_SPOOFER - Setup - LTX & Moka"
 color 5
 
 net session >nul 2>&1
@@ -32,7 +33,7 @@ echo [OK] Python detected.
 echo.
 
 echo Installing required Python packages...
-pip install -r requirements.txt
+pip install -r "%~dp0requirements.txt"
 if %errorlevel% neq 0 (
     echo [ERROR] Failed to install Python packages.
     pause
@@ -49,7 +50,7 @@ if %errorlevel% equ 0 (
 ) else (
     echo NPCAP is not installed.
     echo Launching NPCAP installer...
-    start "" "npcap-1.86.exe"
+    start "" "%~dp0npcap-1.86.exe"
     echo Please complete the NPCAP installation window.
     pause
 )
@@ -63,5 +64,5 @@ echo.
 echo Press any key to start arp_spoofer.py
 pause >nul
 
-start "" start.bat
+start "" "%~dp0start.bat"
 exit /b 0
