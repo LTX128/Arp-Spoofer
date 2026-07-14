@@ -45,10 +45,27 @@ if os.name == "nt":
 _session_logger: Optional["SessionLogger"] = None
 
 title = "ARP-SPOOFER - LTX & Moka"
-if os.name == "nt":
-    os.system(f"title {title}")
-else:
-    sys.stdout.write(f"\x1b]2;{title}\x07")
+
+
+def set_console_title(text: str) -> None:
+    """Set console title without cmd.exe (safe with '&' and special chars)."""
+    if os.name == "nt":
+        try:
+            ctypes.windll.kernel32.SetConsoleTitleW(str(text))
+        except Exception:
+            pass
+    else:
+        sys.stdout.write(f"\x1b]2;{text}\x07")
+
+
+def clear_console() -> None:
+    if os.name == "nt":
+        subprocess.run("cls", shell=True, check=False)
+    else:
+        subprocess.run(["clear"], check=False)
+
+
+set_console_title(os.environ.get("ARP_SPOOFER_WINDOW_TITLE", title))
 
 CHECK_INTERVAL = 30
 TARGET_REFRESH_INTERVAL = 300
@@ -128,7 +145,7 @@ def safe_print(text: str, **kwargs):
 
 
 def print_banner():
-    os.system("cls" if os.name == "nt" else "clear")
+    clear_console()
     lines = [
         " █████╗ ██████╗ ██████╗       ███████╗██████╗  ██████╗  ██████╗ ███████╗███████╗██████╗ ",
         "██╔══██╗██╔══██╗██╔══██╗      ██╔════╝██╔══██╗██╔═══██╗██╔═══██╗██╔════╝██╔════╝██╔══██╗",
@@ -406,6 +423,8 @@ def run_cmd(cmd, timeout=30, encoding=None):
             errors="replace",
         )
         return result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    except KeyboardInterrupt:
+        raise
     except (subprocess.TimeoutExpired, Exception) as exc:
         return False, str(exc)
 
@@ -470,6 +489,22 @@ class SessionLogger:
                 fh.write(line)
 
 
+def pause_console(message: str = "\nPress Enter to continue..."):
+    """Keep the console open so scan output can be read (especially after UAC relaunch)."""
+    try:
+        if sys.stdin.isatty():
+            input(message)
+            return
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+    if os.name == "nt":
+        try:
+            os.system("pause")
+        except Exception:
+            pass
+
+
 def check_admin_windows() -> bool:
     if os.name != "nt":
         return os.geteuid() == 0
@@ -496,8 +531,9 @@ def request_admin_elevation() -> None:
     safe_print(f"{Fore.YELLOW}[*] Administrator privileges required.")
     safe_print(f"{Fore.YELLOW}[*] Accept the UAC prompt to continue...")
 
-    script_dir = os.path.dirname(os.path.abspath(sys.argv[0])) or os.getcwd()
-    params = subprocess.list2cmdline(sys.argv)
+    script_path = os.path.abspath(sys.argv[0])
+    script_dir = os.path.dirname(script_path) or os.getcwd()
+    params = subprocess.list2cmdline([script_path] + sys.argv[1:])
 
     ret = ctypes.windll.shell32.ShellExecuteW(
         None,
@@ -2122,6 +2158,7 @@ class SpoofSession:
         except KeyboardInterrupt:
             self._stop.set()
             self._restore()
+            return
 
     def _restore(self):
         print(f"\n\n{Fore.LIGHTCYAN_EX}[*] Restoring network state... Please wait.")
@@ -2148,27 +2185,52 @@ def resolve_network_args(args, selected: Optional[NetworkAdapter] = None) -> tup
 
 
 def run_scan_mode(args):
-    print_banner()
-    selected = configure_network(args)
-    ip_range, _ = resolve_network_args(args, selected)
-    log_info(f"Standalone scan mode - range: {ip_range}")
-    devices = visual_scan(ip_range)
-    if args.output and devices:
-        export_scan_results(devices, args.output)
-    sys.exit(0)
+    exit_code = 0
+    try:
+        print_banner()
+        selected = configure_network(args)
+        ip_range, _ = resolve_network_args(args, selected)
+        log_info(f"Standalone scan mode - range: {ip_range}")
+        devices = visual_scan(ip_range)
+        if args.output and devices:
+            export_scan_results(devices, args.output)
+    except KeyboardInterrupt:
+        log_info("Stopped by user.")
+        exit_code = 0
+    except SystemExit as exc:
+        exit_code = int(exc.code) if isinstance(exc.code, int) else 1
+    except Exception as exc:
+        log_err(f"Scan failed: {exc}")
+        exit_code = 1
+    finally:
+        pause_console()
+    sys.exit(exit_code)
 
 
 def run_wifi_scan_mode(args):
-    print_banner()
-    if os.name != "nt":
-        log_err("WiFi scan is only supported on Windows.")
-        sys.exit(1)
-    resilience = NetworkResilience(NetworkContext())
-    resilience.capture_initial_wifi()
-    networks = resilience.display_wifi_scan()
-    if args.output and networks:
-        export_wifi_results(networks, args.output)
-    sys.exit(0)
+    exit_code = 0
+    try:
+        print_banner()
+        if os.name != "nt":
+            log_err("WiFi scan is only supported on Windows.")
+            exit_code = 1
+            return
+        resilience = NetworkResilience(NetworkContext())
+        resilience.capture_initial_wifi()
+        networks = resilience.display_wifi_scan()
+        if args.output and networks:
+            export_wifi_results(networks, args.output)
+    except KeyboardInterrupt:
+        log_info("Stopped by user.")
+        exit_code = 0
+    except SystemExit as exc:
+        exit_code = int(exc.code) if isinstance(exc.code, int) else 1
+    except Exception as exc:
+        log_err(f"WiFi scan failed: {exc}")
+        exit_code = 1
+    finally:
+        pause_console()
+    sys.exit(exit_code)
 
 
 def init_session_logger(log_file: Optional[str]):
@@ -2178,59 +2240,74 @@ def init_session_logger(log_file: Optional[str]):
 
 
 def main():
-    args = get_arguments()
+    session = None
+    try:
+        args = get_arguments()
 
-    if args.scan:
-        run_scan_mode(args)
-    if args.scan_wifi:
-        run_wifi_scan_mode(args)
+        if args.scan:
+            run_scan_mode(args)
+        if args.scan_wifi:
+            run_wifi_scan_mode(args)
 
-    print_banner()
+        print_banner()
 
-    if os.name == "nt" and not check_admin_windows():
-        log_warn("Running without administrator rights - some features may not work.")
-        log_warn("Relaunch without --no-elevate to trigger the UAC prompt.")
+        if os.name == "nt" and not check_admin_windows():
+            log_warn("Running without administrator rights - some features may not work.")
+            log_warn("Relaunch without --no-elevate to trigger the UAC prompt.")
 
-    init_session_logger(args.log_file)
+        init_session_logger(args.log_file)
 
-    selected = configure_network(args)
-    if selected and conf.iface:
-        log_info(f"Network interface: {conf.iface} ({selected.name})")
-    elif conf.iface:
-        log_info(f"Network interface: {conf.iface}")
+        selected = configure_network(args)
+        if selected and conf.iface:
+            log_info(f"Network interface: {conf.iface} ({selected.name})")
+        elif conf.iface:
+            log_info(f"Network interface: {conf.iface}")
 
-    args.ip_range, args.gateway = resolve_network_args(args, selected)
-    log_info(f"Network: {args.ip_range} | Gateway: {args.gateway}")
+        args.ip_range, args.gateway = resolve_network_args(args, selected)
+        log_info(f"Network: {args.ip_range} | Gateway: {args.gateway}")
 
-    enable_ip_forwarding()
+        enable_ip_forwarding()
 
-    initial_ctx = NetworkContext(
-        ip_range=args.ip_range,
-        gateway=args.gateway,
-        interface_name=selected.name if selected else "",
-    )
-    resilience = NetworkResilience(initial_ctx)
-    resilience.capture_initial_wifi()
-    resilience.refresh_context()
+        initial_ctx = NetworkContext(
+            ip_range=args.ip_range,
+            gateway=args.gateway,
+            interface_name=selected.name if selected else "",
+        )
+        resilience = NetworkResilience(initial_ctx)
+        resilience.capture_initial_wifi()
+        resilience.refresh_context()
 
-    if not args.no_recovery and not resilience.has_internet():
-        log_warn("No internet at startup - running recovery...")
-        resilience.recover_connectivity()
-        ctx = resilience.refresh_context()
-        if ctx.ip_range:
-            args.ip_range = ctx.ip_range
-        if ctx.gateway:
-            args.gateway = ctx.gateway
+        if not args.no_recovery and not resilience.has_internet():
+            log_warn("No internet at startup - running recovery...")
+            resilience.recover_connectivity()
+            ctx = resilience.refresh_context()
+            if ctx.ip_range:
+                args.ip_range = ctx.ip_range
+            if ctx.gateway:
+                args.gateway = ctx.gateway
 
-    session = SpoofSession(args, resilience)
-    if not session.setup_targets():
-        sys.exit(1)
-    session.run()
-    sys.exit(0)
+        session = SpoofSession(args, resilience)
+        if not session.setup_targets():
+            sys.exit(1)
+        session.run()
+        sys.exit(0)
+    except KeyboardInterrupt:
+        safe_print(f"\n\n{Fore.LIGHTCYAN_EX}[*] Stopped by user.")
+        if session is not None:
+            try:
+                session._stop.set()
+                session._restore()
+            except Exception:
+                pass
+        sys.exit(0)
 
 
 if __name__ == "__main__":
     request_admin_elevation()
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        safe_print(f"\n\n{Fore.LIGHTCYAN_EX}[*] Stopped by user.")
+        sys.exit(0)
 
 # Made by LTX & Moka
