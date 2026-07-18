@@ -2,7 +2,7 @@
 
 **By LTX & Moka**
 
-A network-aware ARP spoofing framework for Windows with automatic recovery, WiFi management, adapter selection, traffic sniffing, and long-running session stability.
+A network-aware ARP spoofing framework for Windows with automatic recovery, WiFi management, adapter selection, traffic sniffing, and long-running session stability. Built for enterprise-grade red-teaming and stability.
 
 > **Disclaimer:** This tool is intended for **authorized security testing and educational purposes only**. Only use it on networks and systems you own or have explicit written permission to test.
 
@@ -33,7 +33,7 @@ A network-aware ARP spoofing framework for Windows with automatic recovery, WiFi
 
 ## Overview
 
-`arp_spoofer.py` is a Man-in-the-Middle (MITM) tool that performs **ARP cache poisoning** to intercept traffic between targets and the gateway on a local network. Unlike a basic ARP spoofer, this script is built to **run for extended periods** and **adapt to network changes** automatically.
+`arp_spoofer.py` is a Man-in-the-Middle (MITM) tool that performs **ARP cache poisoning** to intercept traffic between targets and the gateway on a local network. Unlike a basic ARP spoofer, this script is built to **run for extended periods**, **adapt to network changes** automatically, and **handle massive target lists without crashing**.
 
 It was designed primarily for **Windows** and includes:
 
@@ -41,8 +41,10 @@ It was designed primarily for **Windows** and includes:
 - Manual configuration mode
 - Internet connectivity monitoring and auto-recovery
 - WiFi reconnect and captive portal handling
-- Live DNS and HTTP logging
+- Live DNS, HTTP logging, and PCAP capture
 - Standalone network and WiFi scanning with export
+- L2 raw socket injection for zero-CPU overhead
+- Unkillable wrapper and global `Ctrl+C` handling
 
 ---
 
@@ -50,14 +52,15 @@ It was designed primarily for **Windows** and includes:
 
 | Category | Capabilities |
 |----------|-------------|
-| **ARP Spoofing** | Bidirectional poisoning (target ↔ gateway), multi-target support |
-| **Targeting** | Manual single target or auto-attack all devices (`-a`) |
-| **Sniffing** | Live DNS query and HTTP request logging (`-s`) |
+| **ARP Spoofing** | Bidirectional poisoning (target ↔ gateway), multi-target support, L2Socket injection, packet caching |
+| **Targeting** | Manual single target, auto-attack all devices (`-a`), direct target (`-t`), IP whitelist (`--whitelist`) |
+| **Sniffing** | Live DNS/HTTP logging (`-s`), full PCAP traffic capture (`--pcap`) |
+| **Attack Options** | MAC spoofing (`--spoof-mac`), 802.11 Deauthentication (`--deauth`), speed control (`--interval`) |
 | **Network config** | Auto-detect, manual mode (`--manual`), adapter picker (`-i`) |
 | **Scanning** | ARP device scan (`--scan`), WiFi scan (`--scan-wifi`), JSON/CSV export |
 | **Recovery** | DHCP renew, IP change, MAC rotation, adapter reset, WiFi reconnect |
 | **WiFi** | Profile capture, smart reconnect, captive portal auto-accept |
-| **Stability** | Watchdog thread, target/MAC refresh, spoof failure recovery |
+| **Stability** | Watchdog thread, target/MAC refresh, spoof failure recovery, unkillable wrapper |
 | **Logging** | Session logs written to `logs/` directory |
 | **Windows** | PowerShell adapter detection, `wlanapi` native scan |
 
@@ -140,8 +143,11 @@ python arp_spoofer.py -i -a -s
 # Manual configuration (no auto-detect)
 python arp_spoofer.py --manual -r 192.168.1.0/24 -g 192.168.1.1 -i -a
 
-# Full auto mode
-python arp_spoofer.py -a -s
+# Full auto mode with PCAP capture and 0.5s interval
+python arp_spoofer.py -a -s --pcap capture.pcap --interval 0.5
+
+# Target specific IP, spoof MAC, and deauth another IP
+python arp_spoofer.py -t 192.168.1.50 --spoof-mac --deauth 192.168.1.25
 ```
 
 ---
@@ -157,7 +163,13 @@ python arp_spoofer.py -a -s
 | `-r`, `--range` | Network range (e.g. `192.168.1.0/24`) |
 | `-g`, `--gateway` | Gateway IP address |
 | `-a`, `--all` | Auto-target all devices on the network |
+| `-t`, `--target` | Target a specific IP directly (bypasses interactive menu) |
 | `-s`, `--sniff` | Enable live DNS/HTTP traffic sniffing |
+| `--pcap` | Save all sniffed traffic to a PCAP file |
+| `--whitelist` | Comma-separated IPs to exclude from auto-attack (`-a`) |
+| `--spoof-mac` | Randomize MAC address before starting |
+| `--deauth <IP>` | Continuously send 802.11 deauth frames to a target IP (use `all` for broadcast) |
+| `--interval` | Spoofing interval in seconds (default: `2.0`) |
 | `-i`, `--interface [N]` | List adapters and select one. Use `-i` for interactive, `-i 2` for direct selection |
 | `--manual` | Manual mode: disables auto-detect, requires `-r` and `-g` |
 | `--no-recovery` | Disable automatic internet/WiFi recovery |
@@ -260,39 +272,47 @@ For each target, the script sends spoofed ARP replies:
 
 Traffic flows through your machine, enabling interception and sniffing.
 
+### Performance Engine
+
+- **L2Socket Injection:** Instead of opening and closing a raw socket for every packet (`scapy.sendp`), the script opens a persistent `scapy.L2socket`. Packets are injected directly to the network card, reducing CPU usage to near zero.
+- **Packet Caching:** ARP packets are built once and stored in an internal cache. The spoofing loop merely iterates over pre-built bytes, only rebuilding the cache if a target MAC changes.
+
 ### Target selection
 
 | Mode | Behavior |
 |------|----------|
 | **Default** | ARP scan → display device table → you pick one IP |
-| **`-a` (auto)** | Silently scans and attacks all devices except the gateway |
+| **`-a` (auto)** | Silently scans and attacks all devices except the gateway and whitelist |
+| **`-t` (direct)** | Bypasses scanning, directly attacks the specified IP |
 
 ### Live status bar
 
-During the attack, a real-time status line is displayed:
+During the attack, a real-time status line is displayed. ANSI line-clearing ensures DNS/WEB logs don't fragment the status bar:
 
 ```
 Packets: 126 | Targets: 21 | Internet: ONLINE | Uptime: 00:15:33 | Ctrl+C to stop
 ```
 
-### Clean exit
+### Clean exit & Unkillable Wrapper
 
-Press `Ctrl+C` to stop. The script sends restoration ARP packets to all targets and the gateway to restore normal network operation.
+Press `Ctrl+C` to stop. A global `sys.excepthook` intercepts the interrupt, stops all background threads instantly using `Event.wait()`, and sends restoration ARP packets to restore normal network operation.
+
+If a fatal error occurs, the script catches it, logs the traceback, and prompts: `Do you want to restart the script? (y/N)`.
 
 ### Background maintenance
 
 | Task | Interval | Description |
 |------|----------|-------------|
 | Watchdog | 30s | Checks gateway, internet, triggers recovery |
-| Target refresh | 5 min | Detects new devices (auto-attack mode) |
-| MAC refresh | 3 min | Re-resolves ARP for all targets |
+| Target refresh | 1 min | Detects new devices (auto-attack mode) |
+| MAC refresh | 1.15 min | Re-resolves ARP for all targets |
 | Spoof failure recovery | Per cycle | Re-fetches MAC after 5 consecutive failures |
 
 ---
 
 ## Traffic Sniffing
 
-Enable with `-s`. The sniffer runs in a background thread and logs:
+Enable with `-s` or `--pcap`. The sniffer runs in a non-blocking background thread (1-second burst sniffing) and logs:
 
 ### DNS Log
 
@@ -314,6 +334,14 @@ Captures HTTP requests (unencrypted):
 
 ```
 [WEB LOG] example.com/path/to/page
+```
+
+### PCAP Capture (`--pcap`)
+
+Save all raw traffic to a file for offline analysis (e.g., Wireshark). Uses `scapy.PcapWriter` in synchronous mode to write to disk without consuming RAM.
+
+```bash
+python arp_spoofer.py -a -s --pcap capture.pcap
 ```
 
 ---
@@ -496,8 +524,10 @@ arp_spoofer.py
 |   |-- _method_wifi_scan_and_connect()  Scan and connect to best network
 |
 |-- SpoofSession
-|   |-- setup_targets()              Manual or auto target selection
-|   |-- spoof_cycle()                Send ARP poison packets
+|   |-- setup_targets()              Manual, auto, or direct (-t) target selection
+|   |-- spoof_cycle()                Send ARP poison packets via L2Socket
+|   |-- _build_packet_cache()        Pre-build ARP frames for zero-CPU injection
+|   |-- deauth_thread()              802.11 deauthentication spawner
 |   |-- watchdog_loop()              Background monitoring thread
 |   |-- refresh_targets_if_needed()  Detect new devices every 5 min
 |   |-- refresh_target_macs()        Re-resolve MACs every 3 min
@@ -514,6 +544,7 @@ arp_spoofer.py
 |
 |-- Utilities
     |-- request_admin_elevation()    UAC auto-elevation
+    |-- _excepthook()                Global Ctrl+C intercept and clean exit
     |-- get_mac()                    ARP resolution with retries
     |-- silent_scan() / visual_scan()  Network device discovery
     |-- export_scan_results()        JSON/CSV device export
@@ -536,7 +567,7 @@ arp_spoofer.py
 | File | Description |
 |------|-------------|
 | `arp_spoofer.py` | Main script |
-| `auto_generate.py` | Interactive command builder wizard |
+| `auto_generate.py` | Interactive command builder wizard with color-coded prompts |
 | `start.bat` | Main menu launcher |
 | `scan.bat` | Quick network scan launcher |
 | `setup.bat` | Dependency and Npcap installer |
@@ -556,6 +587,7 @@ arp_spoofer.py
 | Empty DNS logs | Only valid DNS queries are logged (fixed in latest version) |
 | UAC prompt denied | Right-click terminal → Run as administrator |
 | Virtual adapter selected | Use `-i` to manually pick WiFi or Ethernet |
+| High CPU usage during attack | Ensure L2Socket is initialized (check logs for "L2 raw socket opened") |
 
 ---
 
