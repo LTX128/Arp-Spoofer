@@ -572,14 +572,6 @@ arp_spoofer.py
     |-- safe_print()                 Console-safe output
 ```
 
-### Data classes
-
-| Class | Purpose |
-|-------|---------|
-| `NetworkAdapter` | Network interface (name, type, IP, gateway, prefix) |
-| `NetworkContext` | Runtime network state (IP, gateway, WiFi profile, interface) |
-| `WifiNetwork` | WiFi scan result (SSID, BSSID, signal, auth) |
-
 ---
 
 ## Authors
