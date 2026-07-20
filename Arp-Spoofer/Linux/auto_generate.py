@@ -50,6 +50,24 @@ def pause_console(message: str = "\nPress Enter to continue..."):
         pass
 
 
+def prompt_yes_no(prompt: str, default: bool = False) -> bool:
+    hint = "[y/N]" if not default else "[Y/n]"
+    while True:
+        try:
+            raw = input(Fore.LIGHTGREEN_EX + f"{prompt} {hint}: ").strip().lower()
+        except KeyboardInterrupt:
+            print(Fore.RED + "\n[*] Interrupted. Exiting cleanly.")
+            sys.exit(0)
+            
+        if not raw:
+            return default
+        if raw in ("y", "yes"):
+            return True
+        if raw in ("n", "no"):
+            return False
+        print(Fore.RED + "[!] Invalid choice. Please answer Y or N.")
+
+
 def launch_spoofer(args: list[str], elevated: bool = True) -> bool:
     if not os.path.isfile(SCRIPT_PATH):
         print(Fore.RED + f"[!] Missing script: {SCRIPT_PATH}")
@@ -96,8 +114,8 @@ def banner():
     print(Fore.CYAN + r"""
          █████╗ ██████╗ ██████╗       ███████╗██████╗  ██████╗  ██████╗ ███████╗███████╗██████╗ 
         ██╔══██╗██╔══██╗██╔══██╗      ██╔════╝██╔══██╗██╔═══██╗██╔═══██╗██╔════╝██╔════╝██╔══██╗
-        ███████║██████╔╝██████╔╝█████╗███████╗██████╔╝██║   ██║██║   ██║█████╗  █████╗  ██████╔╝
-        ██╔══██║██╔══██╗██╔═══╝ ╚════╝╚════██║██╔═══╝ ██║   ██║██║   ██║██╔══╝  ██╔══╝  ██╔══██╗
+        ███████║██████╔╝██████╔╝█████╗███████║██████╔╝██║   ██║██║   ██║█████╗  █████╗  ██████╔╝
+        ██╔══██║██╔══██║██╔═══╝ ╚════╝╚════██║██╔═══╝ ██║   ██║██║   ██║██╔══╝  ██╔══╝  ██╔══██╗
         ██║  ██║██║  ██║██║           ███████║██║     ╚██████╔╝╚██████╔╝██║     ███████╗██║  ██║
         ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝           ╚══════╝╚═╝      ╚═════╝  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═╝
                     Auto Command Generator - By LTX & Moka
@@ -111,17 +129,24 @@ def separator():
 def build_spoofer_args(mode: str) -> list[str]:
     args: list[str] = []
 
+    def safe_input(prompt: str) -> str:
+        try:
+            return input(prompt).strip()
+        except KeyboardInterrupt:
+            print(Fore.RED + "\n[*] Interrupted. Exiting cleanly.")
+            sys.exit(0)
+
     if mode == "2":
-        export = input(Fore.GREEN + "Export to file? (.json/.csv, leave empty to skip): ").strip()
+        export = safe_input(Fore.LIGHTYELLOW_EX + "[?] Export to file? (.json/.csv, leave empty to skip): ")
         args.append("--scan")
         if export:
             args.extend(["-o", export])
-        if input(Fore.GREEN + "Select adapter with -i? (y/n): ").lower() == "y":
+        if prompt_yes_no("Select adapter with -i?"):
             args.append("-i")
         return args
 
     if mode == "3":
-        export = input(Fore.GREEN + "Export to file? (.json/.csv, leave empty to skip): ").strip()
+        export = safe_input(Fore.LIGHTYELLOW_EX + "[?] Export to file? (.json/.csv, leave empty to skip): ")
         args.append("--scan-wifi")
         if export:
             args.extend(["-o", export])
@@ -131,27 +156,39 @@ def build_spoofer_args(mode: str) -> list[str]:
     print(Fore.WHITE + "  1. Auto-detect (recommended)")
     print(Fore.WHITE + "  2. Select adapter (-i)")
     print(Fore.WHITE + "  3. Manual (-r / -g)")
-    net_mode = input(Fore.GREEN + "Choice (1/2/3) [1]: ").strip() or "1"
+    net_mode = safe_input(Fore.LIGHTCYAN_EX + "Choice (1/2/3) [1]: ") or "1"
 
     if net_mode == "2":
         args.append("-i")
     elif net_mode == "3":
-        net_range = input(Fore.WHITE + "[?] Network range (e.g. 192.168.1.0/24): ").strip()
-        gateway = input(Fore.WHITE + "[?] Gateway IP (e.g. 192.168.1.1): ").strip()
+        net_range = safe_input(Fore.LIGHTYELLOW_EX + "[?] Network range (e.g. 192.168.1.0/24): ")
+        gateway = safe_input(Fore.LIGHTYELLOW_EX + "[?] Gateway IP (e.g. 192.168.1.1): ")
         args.extend(["--manual", "-r", net_range, "-g", gateway])
-        if input(Fore.GREEN + "Select adapter with -i? (y/n): ").lower() == "y":
+        if prompt_yes_no("Select adapter with -i?"):
             args.append("-i")
 
-    print(Fore.CYAN + "\n[OPTION] -a  (Auto Attack)")
-    if input(Fore.GREEN + "Enable -a ? (y/n): ").lower() == "y":
+    if prompt_yes_no("Enable -a (Auto Attack)?", default=True):
         args.append("-a")
+        
+        if prompt_yes_no("Enable --spoof-mac (Randomize MAC)?"):
+            args.append("--spoof-mac")
+            
+        deauth_ip = safe_input(Fore.LIGHTYELLOW_EX + "[?] --deauth target IP (or 'all' for broadcast, leave empty to skip): ")
+        if deauth_ip:
+            args.extend(["--deauth", deauth_ip])
+            
+        whitelist_ips = safe_input(Fore.LIGHTYELLOW_EX + "[?] --whitelist IPs (comma-separated, leave empty to skip): ")
+        if whitelist_ips:
+            args.extend(["--whitelist", whitelist_ips])
 
-    print(Fore.CYAN + "\n[OPTION] -s  (Sniffer)")
-    if input(Fore.GREEN + "Enable -s ? (y/n): ").lower() == "y":
+    if prompt_yes_no("Enable -s (Sniffer)?", default=True):
         args.append("-s")
+        
+        pcap_file = safe_input(Fore.LIGHTYELLOW_EX + "[?] --pcap file path (leave empty to skip): ")
+        if pcap_file:
+            args.extend(["--pcap", pcap_file])
 
-    print(Fore.CYAN + "\n[OPTION] --no-recovery")
-    if input(Fore.GREEN + "Disable recovery? (y/n): ").lower() == "y":
+    if prompt_yes_no("Disable recovery (--no-recovery)?"):
         args.append("--no-recovery")
 
     return args
@@ -171,7 +208,12 @@ def main():
     print(Fore.WHITE + "  1. ARP Attack (spoof)")
     print(Fore.WHITE + "  2. Scan devices (--scan)")
     print(Fore.WHITE + "  3. Scan WiFi (--scan-wifi)")
-    mode = input(Fore.GREEN + "Choice (1/2/3) [1]: ").strip() or "1"
+    
+    try:
+        mode = input(Fore.LIGHTCYAN_EX + "Choice (1/2/3) [1]: ").strip() or "1"
+    except KeyboardInterrupt:
+        print(Fore.RED + "\n[*] Interrupted. Exiting cleanly.")
+        sys.exit(0)
 
     spoofer_args = build_spoofer_args(mode)
     if NO_ELEVATE and "--no-elevate" not in spoofer_args:
@@ -182,7 +224,7 @@ def main():
     print(Fore.MAGENTA + command_preview)
     separator()
 
-    if input(Fore.WHITE + "\nStart ARP-SPOOFER? (y/n): ").lower() != "y":
+    if not prompt_yes_no("\nStart ARP-SPOOFER?", default=True):
         print(Fore.YELLOW + "[*] Cancelled.")
         pause_console()
         return

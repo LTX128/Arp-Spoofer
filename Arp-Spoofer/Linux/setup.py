@@ -4,6 +4,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import argparse
 
 if os.name == "nt":
     print("This setup script is for Linux. Use Windows/setup.bat instead.")
@@ -33,6 +34,10 @@ def pause(message: str = "\nPress Enter to continue..."):
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="ARP-SPOOFER Setup")
+    parser.add_argument("--force", action="store_true", help="Force destroy and reinstall venv from scratch")
+    args, unknown = parser.parse_known_args()
+
     os.chdir(SCRIPT_DIR)
     os.makedirs(os.path.join(SCRIPT_DIR, "logs"), exist_ok=True)
 
@@ -49,10 +54,16 @@ def main() -> None:
         print("[*] Checking Python installation...")
         print(f"[OK] Python {sys.version.split()[0]} detected.")
         print()
+        
+        if args.force:
+            print("[*] --force flag detected. Nuking venv and reinstalling...")
+            
         print("[*] Setting up virtual environment...")
-        if not install_requirements(REQUIREMENTS):
+        if not install_requirements(REQUIREMENTS, force_reinstall=args.force):
+            print("[FATAL] Setup failed even after retries. Check your internet connection or system packages.")
             pause()
             sys.exit(1)
+            
         print("[OK] Virtual environment ready.")
         print("[*] Restarting setup inside the virtual environment...")
         os.execv(VENV_PYTHON, [VENV_PYTHON, __file__, *sys.argv[1:]])

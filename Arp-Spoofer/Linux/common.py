@@ -8,7 +8,7 @@ from typing import Optional
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REQUIREMENTS = os.path.join(SCRIPT_DIR, "requirements.txt")
-START_SCRIPT = os.path.join(SCRIPT_DIR, "start.py")
+START_SCRIPT = os.path.join(SCRIPT_DIR, "auto_generate.py")
 VENV_DIR = os.path.join(SCRIPT_DIR, "venv")
 VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python")
 VENV_PIP = os.path.join(VENV_DIR, "bin", "pip")
@@ -41,6 +41,19 @@ def get_python() -> str:
     return sys.executable
 
 
+def destroy_venv() -> bool:
+    """Nuke the venv directory from orbit."""
+    if os.path.exists(VENV_DIR):
+        print("[*] Destroying existing virtual environment (venv/)...")
+        try:
+            shutil.rmtree(VENV_DIR, ignore_errors=True)
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to remove venv: {e}")
+            return False
+    return True
+
+
 def create_venv() -> bool:
     if venv_ready():
         return True
@@ -62,29 +75,40 @@ def create_venv() -> bool:
     return venv_ready()
 
 
-def install_requirements(requirements_path: Optional[str] = None) -> bool:
-    """Create local venv and install all Python dependencies inside it."""
+def install_requirements(requirements_path: Optional[str] = None, force_reinstall: bool = False) -> bool:
+    """Create local venv and install all Python dependencies inside it. Nukes and retries on failure."""
     req = requirements_path or REQUIREMENTS
     if not os.path.isfile(req):
         print(f"[ERROR] Missing requirements file: {req}")
         return False
 
+    if force_reinstall:
+        destroy_venv()
+
     if not create_venv():
         return False
 
-    print("[*] Installing Python packages in virtual environment...")
-    upgrade = subprocess.run([VENV_PIP, "install", "-U", "pip"], capture_output=True, text=True)
+    print("[*] Installing Python packages in virtual environment (no cache)...")
+    upgrade = subprocess.run([VENV_PIP, "install", "--no-cache-dir", "-U", "pip"], capture_output=True, text=True)
     if upgrade.returncode != 0:
         print("[ERROR] Failed to upgrade pip in virtual environment.")
         if upgrade.stderr:
             print(upgrade.stderr.strip())
+        # Nuke and retry once
+        if not force_reinstall:
+            print("[*] Retrying with fresh venv...")
+            return install_requirements(req, force_reinstall=True)
         return False
 
-    install = subprocess.run([VENV_PIP, "install", "-r", req], capture_output=True, text=True)
+    install = subprocess.run([VENV_PIP, "install", "--no-cache-dir", "-r", req], capture_output=True, text=True)
     if install.returncode != 0:
         print("[ERROR] Failed to install Python packages in virtual environment.")
         if install.stderr:
             print(install.stderr.strip())
+        # Nuke and retry once
+        if not force_reinstall:
+            print("[*] Retrying with fresh venv...")
+            return install_requirements(req, force_reinstall=True)
         return False
 
     verify = subprocess.run(
@@ -96,6 +120,10 @@ def install_requirements(requirements_path: Optional[str] = None) -> bool:
         print("[ERROR] Virtual environment verification failed (colorama/scapy).")
         if verify.stderr:
             print(verify.stderr.strip())
+        # Nuke and retry once
+        if not force_reinstall:
+            print("[*] Verification failed. Nuking venv and retrying from scratch...")
+            return install_requirements(req, force_reinstall=True)
         return False
 
     return True
@@ -162,7 +190,7 @@ def bootstrap_venv(script_path: str) -> None:
         print(f"    python3 {os.path.join(SCRIPT_DIR, 'setup.py')}")
         sys.exit(1)
     print("[ERROR] Virtual environment found but packages could not be loaded.")
-    print(f"[!] Re-run setup: python3 {os.path.join(SCRIPT_DIR, 'setup.py')}")
+    print(f"[!] Re-run setup: python3 {os.path.join(SCRIPT_DIR, 'setup.py')} --force")
     print(f"[!] Or use: sudo {VENV_PYTHON} {script_path}")
     sys.exit(1)
 
