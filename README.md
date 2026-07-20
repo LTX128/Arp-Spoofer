@@ -2,7 +2,7 @@
 
 **By LTX & Moka**
 
-A network-aware ARP spoofing framework for Windows with automatic recovery, WiFi management, adapter selection, traffic sniffing, and long-running session stability. Built for enterprise-grade red-teaming and stability.
+A network-aware ARP spoofing framework for **Windows and Linux** with automatic recovery, WiFi management, adapter selection, traffic sniffing, and long-running session stability. Built for enterprise-grade red-teaming and stability.
 
 > **Disclaimer:** This tool is intended for **authorized security testing and educational purposes only**. Only use it on networks and systems you own or have explicit written permission to test.
 
@@ -35,7 +35,7 @@ A network-aware ARP spoofing framework for Windows with automatic recovery, WiFi
 
 `arp_spoofer.py` is a Man-in-the-Middle (MITM) tool that performs **ARP cache poisoning** to intercept traffic between targets and the gateway on a local network. Unlike a basic ARP spoofer, this script is built to **run for extended periods**, **adapt to network changes** automatically, and **handle massive target lists without crashing**.
 
-It was designed primarily for **Windows** and includes:
+It is fully cross-platform, supporting both **Windows** and **Linux** (including Kali, Ubuntu, Arch, and Fedora). It includes:
 
 - Per-adapter network detection (WiFi / Ethernet)
 - Manual configuration mode
@@ -62,7 +62,7 @@ It was designed primarily for **Windows** and includes:
 | **WiFi** | Profile capture, smart reconnect, captive portal auto-accept |
 | **Stability** | Watchdog thread, target/MAC refresh, spoof failure recovery, unkillable wrapper |
 | **Logging** | Session logs written to `logs/` directory |
-| **Windows** | PowerShell adapter detection, `wlanapi` native scan |
+| **Cross-Platform** | Windows (PowerShell, `wlanapi`) & Linux (`iproute2`, `nmcli`, `iw`) |
 
 ---
 
@@ -70,10 +70,11 @@ It was designed primarily for **Windows** and includes:
 
 | Requirement | Details |
 |-------------|---------|
-| **OS** | Windows 10/11 (primary). Limited Linux support. |
+| **OS** | Windows 10/11 or Linux (Debian/Ubuntu, Arch, Fedora, Kali) |
 | **Python** | 3.x |
-| **Npcap** | Required for packet capture (install via `setup.bat`) |
-| **Privileges** | Administrator |
+| **Libraries** | **Windows:** Npcap. **Linux:** libpcap (usually preinstalled) |
+| **Tools (Linux)** | `iproute2`, `wireless-tools` or `iw`, `network-manager` (`nmcli`) |
+| **Privileges** | Administrator (Windows) / Root (Linux) |
 | **Python packages** | `scapy`, `colorama` |
 
 ---
@@ -84,32 +85,47 @@ It was designed primarily for **Windows** and includes:
 
 ```bash
 git clone https://github.com/LTX128/Arp-Spoofer.git
-cd Arp_Soofer
+cd Arp-Spoofer
 ```
 
 ### 2. Run the setup script
 
+**Windows:**
 ```bash
 setup.bat
 ```
+> Do **not** run `setup.bat` as Administrator. The script will trigger UAC automatically.
 
-> Do **not** run `setup.bat` as Administrator.
-
-The setup script will:
+**Linux:**
+```bash
+python3 setup.py
+```
+The Linux setup script will:
 - Verify Python is installed
+- Create a virtual environment (`venv/`)
 - Install dependencies from `requirements.txt`
-- Launch the Npcap installer if not detected
+- Check for required network tools (`ip`, `nmcli`, etc.)
 
 ### 3. Launch the tool
 
+**Windows:**
 ```bash
-start.bat
+python auto_generate.py
 ```
 
-Or run directly:
+**Linux:**
+```bash
+sudo python3 auto_generate.py
+```
+
+Or run the core script directly:
 
 ```bash
+# Windows
 python arp_spoofer.py -h
+
+# Linux
+sudo python3 arp_spoofer.py -h
 ```
 
 ---
@@ -118,8 +134,14 @@ python arp_spoofer.py -h
 
 ### Interactive menu
 
+**Windows:**
 ```bash
-start.bat
+python auto_generate.py
+```
+
+**Linux:**
+```bash
+sudo python3 auto_generate.py
 ```
 
 | Option | Action |
@@ -149,6 +171,7 @@ python arp_spoofer.py -a -s --pcap capture.pcap --interval 0.5
 # Target specific IP, spoof MAC, and deauth another IP
 python arp_spoofer.py -t 192.168.1.50 --spoof-mac --deauth 192.168.1.25
 ```
+*(Note: Use `sudo` on Linux)*
 
 ---
 
@@ -157,7 +180,7 @@ python arp_spoofer.py -t 192.168.1.50 --spoof-mac --deauth 192.168.1.25
 | Argument | Description |
 |----------|-------------|
 | `--scan` | Scan devices on the network and exit |
-| `--scan-wifi` | Scan nearby WiFi networks and exit (Windows) |
+| `--scan-wifi` | Scan nearby WiFi networks and exit |
 | `-o`, `--output` | Export scan results to `.json` or `.csv` |
 | `--log` | Write session events to a custom log file |
 | `-r`, `--range` | Network range (e.g. `192.168.1.0/24`) |
@@ -173,7 +196,7 @@ python arp_spoofer.py -t 192.168.1.50 --spoof-mac --deauth 192.168.1.25
 | `-i`, `--interface [N]` | List adapters and select one. Use `-i` for interactive, `-i 2` for direct selection |
 | `--manual` | Manual mode: disables auto-detect, requires `-r` and `-g` |
 | `--no-recovery` | Disable automatic internet/WiFi recovery |
-| `--no-elevate` | Skip automatic UAC administrator elevation |
+| `--no-elevate` | Skip automatic elevation (UAC on Windows, `sudo` on Linux) |
 
 ---
 
@@ -198,7 +221,9 @@ python arp_spoofer.py --scan -o devices.json
 
 ### 3. WiFi Scan Mode (`--scan-wifi`)
 
-Scans nearby WiFi networks using the Windows WLAN API, displays SSID / BSSID / signal / auth, then exits.
+Scans nearby WiFi networks.
+- **Windows:** Uses native `wlanapi.dll` API.
+- **Linux:** Uses `nmcli`, falls back to `iw` and `iwlist`.
 
 ```bash
 python arp_spoofer.py --scan-wifi
@@ -215,8 +240,10 @@ The script supports three ways to configure the network:
 
 When `-r` and `-g` are not provided and `--manual` is not set:
 
-1. Lists all active network adapters via PowerShell (`Get-NetAdapter`, `Get-NetIPAddress`, `Get-NetRoute`)
-2. Filters out virtual adapters (VirtualBox, VMware, Hyper-V, VPN, etc.)
+1. Lists all active network adapters:
+   - **Windows:** PowerShell (`Get-NetAdapter`, `Get-NetIPAddress`, `Get-NetRoute`)
+   - **Linux:** `ip -j link show` and `ip -j -4 addr show`
+2. Filters out virtual adapters (VirtualBox, VMware, Hyper-V, VPN, Docker, etc.)
 3. Selects the **best adapter** (prioritizes adapters with a valid IP + gateway)
 4. Derives the subnet (actual prefix or `/24`) and gateway from that adapter
 5. Configures Scapy to use the matching capture interface
@@ -366,7 +393,7 @@ When internet or gateway is lost, the following methods are tried in order:
 |------|--------|-------------|
 | 1 | **DHCP Renew** | Reset to DHCP, release/renew IP, flush DNS |
 | 2 | **Local IP Change** | Assign a random static IP in the current subnet |
-| 3 | **MAC Rotation** | Randomize adapter MAC via Windows registry |
+| 3 | **MAC Rotation** | Randomize adapter MAC |
 | 4 | **Adapter Reset** | Disable and re-enable the network interface |
 | 5 | **WiFi Reconnect** | Reconnect to the original WiFi using saved credentials |
 | 6 | **WiFi Scan & Connect** | Scan nearby networks and connect to the best match |
@@ -423,7 +450,7 @@ Disable recovery with `--no-recovery`.
 
 When connected via WiFi, the script saves:
 - SSID, interface name, authentication type
-- Password (from Windows stored profile via `netsh wlan show profile key=clear`)
+- Password (from Windows `netsh` or Linux `nmcli`)
 
 ### Smart WiFi reconnect
 
@@ -435,16 +462,9 @@ When scanning for alternative networks, candidates are ranked by:
 4. Open networks
 5. Signal strength
 
-For secured networks, the saved WiFi password is reused. For open networks, a Windows WLAN profile is created automatically.
+For secured networks, the saved WiFi password is reused. For open networks, a profile is created automatically.
 
 Supported authentication: **Open**, **WPA/WPA2-PSK**, **WPA3-SAE**.
-
-### Native WiFi scanner
-
-`--scan-wifi` uses the Windows `wlanapi.dll` API for live radio scanning:
-- Triggers `WlanScan` on each active adapter
-- Reads BSS list and available network list
-- Falls back to `netsh wlan show networks` if the API returns no results
 
 ---
 
@@ -485,7 +505,7 @@ python arp_spoofer.py -a -s --log my_session.log
 
 ```
 [2026-07-11 14:30:01] [INFO] Session started
-[2026-07-11 14:30:02] [INFO] Auto-selected adapter: Wi-Fi (WiFi)
+[2026-07-11 14:30:02] [INFO] Auto-selected adapter: wlan0 (WiFi)
 [2026-07-11 14:30:03] [INFO] Network: 192.168.1.0/24 | Gateway: 192.168.1.1
 [2026-07-11 14:45:12] [WARN] No internet access detected.
 [2026-07-11 14:45:20] [OK] Connectivity restored via _method_dhcp_renew.
@@ -499,14 +519,14 @@ python arp_spoofer.py -a -s --log my_session.log
 arp_spoofer.py
 |
 |-- Network Configuration
-|   |-- get_network_adapters()       PowerShell adapter enumeration
+|   |-- get_network_adapters()       Cross-platform adapter enumeration (PowerShell / iproute2)
 |   |-- get_best_adapter()           Auto-select best adapter
 |   |-- pick_network_adapter()       Interactive adapter selection (-i)
 |   |-- configure_network()          Resolves auto / manual / -i modes
 |   |-- setup_scapy_iface()          Binds Scapy to the correct interface
 |
-|-- NativeWifiScanner
-|   |-- scan()                       Live WiFi scan via wlanapi.dll
+|-- NativeWifiScanner / Linux Scanner
+|   |-- scan()                       Live WiFi scan (wlanapi.dll / nmcli / iw)
 |   |-- _parse_bss_list()            Parse BSS entries
 |   |-- _read_available_networks()   Read auth types per SSID
 |
@@ -515,7 +535,7 @@ arp_spoofer.py
 |   |-- recover_connectivity()       Multi-step recovery pipeline
 |   |-- handle_captive_portal()      Auto-accept public WiFi portals
 |   |-- capture_initial_wifi()       Save WiFi profile at startup
-|   |-- scan_wifi_networks()         WiFi scan (native + netsh fallback)
+|   |-- scan_wifi_networks()         WiFi scan (native + fallbacks)
 |   |-- _method_dhcp_renew()         DHCP release/renew
 |   |-- _method_change_local_ip()    Random static IP assignment
 |   |-- _method_randomize_mac()      MAC address rotation
@@ -529,8 +549,8 @@ arp_spoofer.py
 |   |-- _build_packet_cache()        Pre-build ARP frames for zero-CPU injection
 |   |-- deauth_thread()              802.11 deauthentication spawner
 |   |-- watchdog_loop()              Background monitoring thread
-|   |-- refresh_targets_if_needed()  Detect new devices every 5 min
-|   |-- refresh_target_macs()        Re-resolve MACs every 3 min
+|   |-- refresh_targets_if_needed()  Detect new devices every 1 min
+|   |-- refresh_target_macs()        Re-resolve MACs every 1.15 min
 |   |-- verify_gateway()             Gateway ARP reachability check
 |   |-- _restore()                   Clean ARP restoration on exit
 |
@@ -543,13 +563,13 @@ arp_spoofer.py
 |   |-- write()                      Timestamped event logging
 |
 |-- Utilities
-    |-- request_admin_elevation()    UAC auto-elevation
+    |-- request_admin_elevation()    UAC auto-elevation / sudo relaunch
     |-- _excepthook()                Global Ctrl+C intercept and clean exit
     |-- get_mac()                    ARP resolution with retries
     |-- silent_scan() / visual_scan()  Network device discovery
     |-- export_scan_results()        JSON/CSV device export
     |-- export_wifi_results()        JSON/CSV WiFi export
-    |-- safe_print()                 Windows console-safe output
+    |-- safe_print()                 Console-safe output
 ```
 
 ### Data classes
@@ -568,9 +588,9 @@ arp_spoofer.py
 |------|-------------|
 | `arp_spoofer.py` | Main script |
 | `auto_generate.py` | Interactive command builder wizard with color-coded prompts |
-| `start.bat` | Main menu launcher |
-| `scan.bat` | Quick network scan launcher |
-| `setup.bat` | Dependency and Npcap installer |
+| `common.py` | Shared helpers for Linux venv management (Linux) |
+| `setup.py` | Dependency installer and venv creator (Linux) |
+| `setup.bat` | Dependency and Npcap installer (Windows) |
 | `requirements.txt` | Python dependencies |
 | `logs/` | Session log directory (created at runtime) |
 
@@ -581,13 +601,16 @@ arp_spoofer.py
 | Problem | Solution |
 |---------|----------|
 | Wrong gateway / subnet detected | Use `-i` to select the correct adapter, or `--manual -r -g` |
-| ARP spoofing not working | Run as Administrator (accept UAC prompt) |
-| No packets captured | Install Npcap with "WinPcap API-compatible Mode" |
-| WiFi scan returns nothing | Enable Location Services in Windows Privacy settings |
+| ARP spoofing not working | Run as Administrator (Windows) or with `sudo` (Linux) |
+| No packets captured (Windows) | Install Npcap with "WinPcap API-compatible Mode" |
+| WiFi scan returns nothing (Windows) | Enable Location Services in Windows Privacy settings |
+| WiFi scan returns nothing (Linux) | Ensure `nmcli` is installed and run with `sudo`. |
+| `L2socket` error on Linux | Re-run `setup.py` to ensure `scapy` is fully installed in the venv. |
 | Empty DNS logs | Only valid DNS queries are logged (fixed in latest version) |
 | UAC prompt denied | Right-click terminal → Run as administrator |
 | Virtual adapter selected | Use `-i` to manually pick WiFi or Ethernet |
 | High CPU usage during attack | Ensure L2Socket is initialized (check logs for "L2 raw socket opened") |
+| `setup.py` fails on Linux | Run `python3 setup.py --force` to wipe and recreate the venv |
 
 ---
 
