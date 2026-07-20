@@ -64,5 +64,5 @@ echo.
 echo Press any key to start arp_spoofer.py
 pause >nul
 
-start "" "%~dp0start.bat"
+start "" "%~dp0auto_generate.py"
 exit /b 0
